@@ -1,0 +1,24 @@
+name: Validación
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pruebas:
+    name: Pruebas del motor conservador
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obtener código
+        uses: actions/checkout@v4
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Comprobar sintaxis
+        run: python -m py_compile main.py gui.py logger.py process_manager.py repair_engine.py scraper.py usb_monitor.py
+      - name: Ejecutar pruebas unitarias
+        run: python -m unittest discover -s tests -v

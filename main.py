@@ -21,13 +21,22 @@ def _verificar_admin() -> bool:
         return False
 
 
-def _ejecutar_como_admin():
-    """Re-ejecuta la aplicación con privilegios de administrador."""
+def _ejecutar_como_admin() -> bool:
+    """Re-ejecuta la aplicación con privilegios, conservando argumentos.
+
+    ``ShellExecuteW`` recibe los parámetros como una sola cadena; usar
+    ``list2cmdline`` evita que una instalación en una ruta con espacios falle.
+    """
     import subprocess
-    ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", sys.executable, os.path.abspath(sys.argv[0]), None, 1
+
+    argumentos = subprocess.list2cmdline([os.path.abspath(sys.argv[0]), *sys.argv[1:]])
+    resultado = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable, argumentos, None, 1
     )
-    sys.exit(0)
+    if resultado <= 32:
+        logger.error(f"No se pudo solicitar elevación de privilegios (código {resultado}).")
+        return False
+    return True
 
 
 def main():
@@ -56,8 +65,10 @@ def main():
             root.destroy()
             
             if resultado:
-                _ejecutar_como_admin()
-                return
+                if _ejecutar_como_admin():
+                    # La nueva instancia elevada ya se lanzó; cerrar esta.
+                    return
+                logger.warning("Elevación cancelada o no disponible. Continuando sin permisos.")
             else:
                 logger.warning("Ejecutando sin permisos de administrador. Funcionalidad limitada.")
         except Exception:

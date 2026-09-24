@@ -19,7 +19,12 @@ from usb_monitor import (
     obtener_monitor_usb, UnidadExtraible,
     es_unidad_reparada, marcar_unidad_reparada, obtener_unidades_reparadas,
 )
-from repair_engine import obtener_motor_reparacion, ResultadoReparacion, EstadoReparacion
+from repair_engine import (
+    obtener_motor_reparacion,
+    EstadoDeteccion,
+    EstadoReparacion,
+    ResultadoReparacion,
+)
 from logger import obtener_logger
 
 logger = obtener_logger()
@@ -94,6 +99,9 @@ class AntivirusGUI:
         self._proceso_en_ejecucion = False
         self._cancelar_reparacion = False
         self._ultimo_conteo_usb = -1
+        # Fuente de verdad de la tabla: evita leer widgets tkinter desde un
+        # hilo de trabajo al finalizar procesos.
+        self._resultados_procesos: List[InfoRutaEACore] = []
         
         # Configuración persistente (tema guardado entre sesiones)
         config = _cargar_config()
@@ -303,7 +311,7 @@ class AntivirusGUI:
         titulo_frame = ttk.Frame(main_frame, style="Header.TFrame")
         titulo_frame.pack(fill="x", pady=(0, 3))
         
-        ttk.Label(titulo_frame, text="🛡️ Antivirus EACoreServer v1.0",
+        ttk.Label(titulo_frame, text="🛡️ Antivirus EACoreServer v1.1",
                    style="Title.TLabel").pack(side="left", padx=10)
         self.lbl_subtitulo = ttk.Label(titulo_frame, text="Protección USB | Gestión de Procesos",
                    font=("Segoe UI", 9), foreground="#d4d4d4")
@@ -350,7 +358,10 @@ class AntivirusGUI:
         table_frame = ttk.Frame(self.tab_procesos)
         table_frame.pack(fill=tk.BOTH, expand=True)
         
-        columns = ("indice", "ruta", "estado", "pid", "usuario", "tamano_kb", "servicio", "error")
+        columns = (
+            "indice", "ruta", "estado", "pid", "usuario", "tamano_kb",
+            "servicio", "clasificacion", "error",
+        )
         self.tree_procesos = ttk.Treeview(table_frame, columns=columns, show="headings",
                                            style="Custom.Treeview", height=15)
         
@@ -361,6 +372,7 @@ class AntivirusGUI:
         self.tree_procesos.heading("usuario", text="Usuario")
         self.tree_procesos.heading("tamano_kb", text="Tamaño KB")
         self.tree_procesos.heading("servicio", text="Servicio")
+        self.tree_procesos.heading("clasificacion", text="Confianza")
         self.tree_procesos.heading("error", text="Error")
         
         self.tree_procesos.column("indice", width=40, anchor="center")
@@ -370,6 +382,7 @@ class AntivirusGUI:
         self.tree_procesos.column("usuario", width=120)
         self.tree_procesos.column("tamano_kb", width=80, anchor="center")
         self.tree_procesos.column("servicio", width=100, anchor="center")
+        self.tree_procesos.column("clasificacion", width=130, anchor="center")
         self.tree_procesos.column("error", width=150)
         
         scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree_procesos.yview)
@@ -388,8 +401,8 @@ class AntivirusGUI:
         ttk.Button(accion_frame, text="Eliminar Exe + .dat Seleccionado", 
                    command=self._eliminar_exe_dat_seleccionado).pack(side="left", padx=5)
         
-        # Acción completa contra el servicio de ProgramData: detiene el servicio
-        # y elimina por completo EACoreServer.exe + EACore.dat (base del virus).
+        # Acción excepcional para la ruta no estándar de ProgramData. Requiere
+        # confirmación; el nombre EACoreServer.exe no basta para identificar malware.
         servicio_frame = ttk.Frame(self.tab_procesos)
         servicio_frame.pack(fill="x", pady=(0, 5))
         ttk.Button(servicio_frame, text="Detener y Eliminar EACoreService (exe + .dat)",
@@ -513,8 +526,9 @@ class AntivirusGUI:
             try:
                 # Obtener rutas del scraping
                 rutas = obtener_rutas_candidatas()
-                self._agregar_log(f"Se obtuvieron {len(rutas)} rutas candidatas.", "INFO")
-                
+                self.root.after(0, self._agregar_log,
+                                f"Se obtuvieron {len(rutas)} rutas candidatas.", "INFO")
+
                 # Escanear cada ruta
                 gestor = obtener_gestor_procesos()
                 resultados = gestor.escanear_rutas(rutas)
@@ -538,7 +552,8 @@ class AntivirusGUI:
         threading.Thread(target=_trabajo, daemon=True).start()
     
     def _actualizar_tabla_procesos(self, resultados: List[InfoRutaEACore]) -> None:
-        """Actualiza la tabla de procesos con los resultados."""
+        """Actualiza la tabla de procesos con los resultados (hilo principal)."""
+        self._resultados_procesos = list(resultados)
         # Limpiar tabla
         for item in self.tree_procesos.get_children():
             self.tree_procesos.delete(item)
@@ -553,7 +568,8 @@ class AntivirusGUI:
             
             item_id = self.tree_procesos.insert("", "end", values=(
                 d["indice"], d["ruta"], d["estado"], d["pid"],
-                d["usuario"], d["tamano_kb"], d["servicio"], d["error"]
+                d["usuario"], d["tamano_kb"], d["servicio"],
+                d["clasificacion"], d["error"]
             ), tags=tags)
         
         activos = sum(1 for r in resultados if r.estado == EstadoProceso.ACTIVO)
@@ -564,45 +580,55 @@ class AntivirusGUI:
         self._escanear_rutas()
     
     def _finalizar_todos(self) -> None:
-        """Finaliza todos los procesos EACoreServer activos."""
+        """Finaliza procesos activos previamente detectados, en segundo plano."""
+        if self._proceso_en_ejecucion:
+            messagebox.showwarning("Aviso", "Ya hay una operación en ejecución.")
+            return
+        rutas_activas = [
+            info.ruta for info in self._resultados_procesos
+            if info.estado == EstadoProceso.ACTIVO
+        ]
+        if not rutas_activas:
+            messagebox.showinfo("Info", "No hay procesos EACoreServer activos para finalizar.")
+            return
+        if not messagebox.askyesno(
+            "Finalizar procesos",
+            f"Se volverán a comprobar y finalizarán {len(rutas_activas)} proceso(s) activos.\n\n"
+            "EACoreServer.exe puede pertenecer a EA/Origin o a un juego legítimo. "
+            "No se eliminarán archivos.\n\n¿Desea continuar?",
+        ):
+            return
+
         self._proceso_en_ejecucion = True
-        self.status_var.set("Finalizando todos los procesos EACoreServer...")
-        self._agregar_log("Iniciando finalización de todos los procesos...", "INFO")
-        
-        def _trabajo():
+        self.status_var.set("Finalizando procesos EACoreServer…")
+        self._agregar_log("Iniciando finalización de procesos activos…", "INFO")
+
+        def _trabajo() -> None:
             try:
                 gestor = obtener_gestor_procesos()
-                items = self.tree_procesos.get_children()
-                activos = []
-                for item in items:
-                    values = self.tree_procesos.item(item)["values"]
-                    if values and values[2] == "activo":
-                        ruta = values[1]
-                        for info in gestor.escanear_rutas(obtener_rutas_candidatas()):
-                            if info.ruta == ruta and info.estado == EstadoProceso.ACTIVO:
-                                activos.append(info)
-                                break
-                
+                activos = [
+                    info for info in gestor.escanear_rutas(rutas_activas)
+                    if info.estado == EstadoProceso.ACTIVO
+                ]
                 if activos:
                     resultados = gestor.finalizar_todo(activos)
-                    self._agregar_log(f"Procesados {len(activos)} procesos activos.", "INFO")
+                    exitos = sum(1 for exito, _ in resultados.values() if exito)
+                    self.root.after(0, self._agregar_log,
+                                    f"Procesos finalizados: {exitos}/{len(activos)}.", "INFO")
                 else:
-                    self._agregar_log("No hay procesos activos para finalizar.", "INFO")
-                
-                # Re-escanear para actualizar
-                rutas = obtener_rutas_candidatas()
-                nuevos = gestor.escanear_rutas(rutas)
-                self.root.after(0, lambda: self._actualizar_tabla_procesos(nuevos))
-                self.root.after(0, lambda: self._agregar_log(
-                    "Todos los procesos han sido procesados.", "INFO"))
-            except Exception as e:
-                self.root.after(0, lambda: self._agregar_log(f"Error finalizando procesos: {e}", "ERROR"))
+                    self.root.after(0, self._agregar_log,
+                                    "Los procesos ya no estaban activos.", "INFO")
+                nuevos = gestor.escanear_rutas(obtener_rutas_candidatas())
+                self.root.after(0, self._actualizar_tabla_procesos, nuevos)
+            except Exception as exc:
+                self.root.after(0, self._agregar_log,
+                                f"Error finalizando procesos: {exc}", "ERROR")
             finally:
-                self.root.after(0, lambda: setattr(self, '_proceso_en_ejecucion', False))
-                self.root.after(0, lambda: self.status_var.set("Finalización completada"))
-        
+                self.root.after(0, lambda: setattr(self, "_proceso_en_ejecucion", False))
+                self.root.after(0, self.status_var.set, "Finalización completada")
+
         threading.Thread(target=_trabajo, daemon=True).start()
-    
+
     def _finalizar_seleccionado(self) -> None:
         """Finaliza el proceso seleccionado en la tabla."""
         seleccion = self.tree_procesos.selection()
@@ -691,6 +717,15 @@ class AntivirusGUI:
         ruta = values[1]
         if not ruta or "eacoreserver.exe" not in ruta.lower():
             messagebox.showwarning("Aviso", "La fila seleccionada no corresponde a EACoreServer.exe.")
+            return
+        gestor = obtener_gestor_procesos()
+        if gestor.ruta_probablemente_legitima(ruta):
+            messagebox.showwarning(
+                "Componente de EA protegido",
+                "La ruta seleccionada parece pertenecer a EA/Origin o a un juego legítimo.\n\n"
+                "Por seguridad, la aplicación no detendrá ni eliminará este archivo solo por su nombre. "
+                "Revise la firma digital y use el desinstalador del producto si corresponde.",
+            )
             return
         ruta_dat = os.path.join(os.path.dirname(ruta), "EACore.dat")
         confirmar = messagebox.askyesno(
@@ -793,168 +828,226 @@ class AntivirusGUI:
             self.root.after(3000, self._auto_refrescar_usb)
     
     def _refrescar_unidades(self) -> None:
-        """Refresca la lista de unidades USB detectadas."""
+        """Refresca el inventario y muestra el diagnóstico no destructivo."""
         monitor = obtener_monitor_usb()
         unidades = monitor.obtener_unidades_actuales()
-        
+        motor = obtener_motor_reparacion()
+
         for item in self.tree_usb.get_children():
             self.tree_usb.delete(item)
-        
+
         reparadas = obtener_unidades_reparadas()
-        
         if not unidades:
             self.tree_usb.insert("", "end", values=(
-                "", "Conecte una unidad (USB, disco o red)...", "—", "—", "—", "Sin unidad"))
+                "", "Conecte una unidad USB…", "—", "—", "—", "Sin unidad"))
             if self._ultimo_conteo_usb != 0:
                 self._agregar_log("No hay unidades USB conectadas.", "DEBUG")
             self._ultimo_conteo_usb = 0
         else:
-            for u in unidades:
-                tamano_gb = round(u.tamano_total / (1024 ** 3), 1)
-                libre_gb = round(u.espacio_libre / (1024 ** 3), 1)
-                
-                # Determinar estado de la unidad
-                estado = "Conectada"
+            for unidad in unidades:
+                tamano_gb = round(unidad.tamano_total / (1024 ** 3), 1)
+                libre_gb = round(unidad.espacio_libre / (1024 ** 3), 1)
+                diagnostico = motor.analizar_ruta(unidad.ruta_raiz)
                 tags = ()
-                ruta_infeccion = os.path.join(u.ruta_raiz, "Kaspersky", "Usb Drive")
-                if os.path.exists(ruta_infeccion):
-                    estado = "⚠ Infectada"
+                if not unidad.es_reparable_con_seguridad:
+                    estado = "Solo diagnóstico (disco interno/red)"
+                elif diagnostico.estado is EstadoDeteccion.CONFIRMADA:
+                    estado = "⚠ Firma confirmada"
                     tags = ("infectada",)
-                elif es_unidad_reparada(u.letra):
+                elif diagnostico.estado is EstadoDeteccion.SOSPECHOSA:
+                    estado = "⚠ Revisión manual requerida"
+                    tags = ("infectada",)
+                elif diagnostico.estado is EstadoDeteccion.INACCESIBLE:
+                    estado = "No accesible"
+                elif es_unidad_reparada(unidad.letra):
                     estado = "✓ Reparada"
                     tags = ("reparada",)
-                
+                else:
+                    estado = "Sin firma detectada"
+
                 self.tree_usb.insert("", "end", values=(
-                    u.letra, u.etiqueta, u.numero_serie or "—",
+                    unidad.letra, unidad.etiqueta, unidad.numero_serie or "—",
                     f"{tamano_gb} GB", f"{libre_gb} GB", estado
                 ), tags=tags)
-            
-            # Solo registrar en log cuando cambia el número de unidades
+
             if self._ultimo_conteo_usb != len(unidades):
                 self._agregar_log(f"Unidades detectadas: {len(unidades)}", "DEBUG")
             self._ultimo_conteo_usb = len(unidades)
-        
-        # Actualizar contador de unidades reparadas (persistidas)
+
         if reparadas:
             self.lbl_reparadas.config(
                 text=f"Unidades reparadas (guardadas): {', '.join(reparadas)}")
         else:
             self.lbl_reparadas.config(text="Unidades reparadas (guardadas): ninguna")
-    
+
     def _reparar_todas_usb(self) -> None:
-        """Repara todas las unidades USB con infección."""
-        monitor = obtener_monitor_usb()
-        unidades = monitor.obtener_unidades_actuales()
-        
-        if not unidades:
-            messagebox.showinfo("Info", "No hay unidades USB conectadas.")
+        """Repara solo medios USB con una firma completa confirmada."""
+        if self._proceso_en_ejecucion:
+            messagebox.showwarning("Aviso", "Ya hay una operación en ejecución.")
             return
-        
+        monitor = obtener_monitor_usb()
+        motor = obtener_motor_reparacion()
+        candidatas = [
+            unidad for unidad in monitor.obtener_unidades_actuales()
+            if unidad.es_reparable_con_seguridad
+            and motor.analizar_ruta(unidad.ruta_raiz).estado is EstadoDeteccion.CONFIRMADA
+        ]
+        if not candidatas:
+            messagebox.showinfo(
+                "Sin reparaciones pendientes",
+                "No hay unidades USB con la firma completa confirmada.\n\n"
+                "Las estructuras incompletas se conservan para revisión manual y los discos internos/red "
+                "solo se muestran en modo diagnóstico.",
+            )
+            return
+        letras = ", ".join(unidad.letra for unidad in candidatas)
+        if not messagebox.askyesno(
+            "Confirmar reparación",
+            f"Se restaurarán archivos y se eliminarán únicamente los archivos de firma conocidos en: {letras}.\n\n"
+            "No se borrará contenido no reconocido. ¿Desea continuar?",
+        ):
+            return
+
         self._proceso_en_ejecucion = True
-        self.status_var.set("Reparando todas las unidades USB...")
-        self._agregar_log("Iniciando reparación de todas las unidades...", "INFO")
-        
-        def _trabajo():
-            for u in unidades:
-                if self._cancelar_reparacion:
-                    break
-                self.root.after(0, self._agregar_log, 
-                              f"Verificando {u.letra}...", "INFO")
-                self.root.after(0, lambda: self.progreso_var.set(0))
-                self.root.after(0, lambda: self.lbl_progreso.config(text=f"Procesando {u.letra}..."))
-                self._reparar_unidad_internal(u.letra)
-                time.sleep(0.5)
-            
-            self.root.after(0, lambda: self.status_var.set("Reparación completada"))
-            self.root.after(0, lambda: setattr(self, '_proceso_en_ejecucion', False))
-            self.root.after(0, lambda: self._agregar_log("Reparación de todas las unidades finalizada.", "INFO"))
-        
+        self._cancelar_reparacion = False
+        self.status_var.set("Reparando unidades USB confirmadas…")
+        self._agregar_log(f"Iniciando reparación de: {letras}", "INFO")
+
+        def _trabajo() -> None:
+            try:
+                for unidad in candidatas:
+                    if self._cancelar_reparacion:
+                        break
+                    self.root.after(0, self.progreso_var.set, 0)
+                    self.root.after(0, self.lbl_progreso.config,
+                                    {"text": f"Procesando {unidad.letra}…"})
+                    resultado = motor.reparar_unidad(
+                        unidad.letra, callback_progreso=self._actualizar_progreso
+                    )
+                    self.root.after(0, self._registrar_resultado_reparacion, resultado)
+            except Exception as exc:
+                self.root.after(0, self._agregar_log,
+                                f"Error reparando unidades: {exc}", "ERROR")
+            finally:
+                self.root.after(0, lambda: setattr(self, "_cancelar_reparacion", False))
+                self.root.after(0, lambda: setattr(self, "_proceso_en_ejecucion", False))
+                self.root.after(0, self.status_var.set, "Reparación finalizada")
+                self.root.after(0, self._refrescar_unidades)
+
         threading.Thread(target=_trabajo, daemon=True).start()
-    
+
     def _reparar_unidad_seleccionada(self) -> None:
-        """Repara la unidad USB seleccionada en la tabla."""
+        """Solicita confirmación antes de reparar una unidad USB concreta."""
+        if self._proceso_en_ejecucion:
+            messagebox.showwarning("Aviso", "Ya hay una operación en ejecución.")
+            return
         seleccion = self.tree_usb.selection()
         if not seleccion:
             messagebox.showwarning("Aviso", "No hay ninguna unidad seleccionada.")
             return
-        
-        item = seleccion[0]
-        values = self.tree_usb.item(item)["values"]
-        letra = values[0]
-        
+        valores = self.tree_usb.item(seleccion[0])["values"]
+        letra = valores[0]
         if not letra:
             messagebox.showwarning("Aviso", "No hay ninguna unidad disponible para reparar.")
             return
-        
-        self._reparar_unidad_internal(letra)
-    
-    def _reparar_unidad_internal(self, letra: str) -> None:
-        """Ejecuta la reparación de una unidad internamente."""
-        self._proceso_en_ejecucion = True
-        
-        def _trabajo():
-            try:
-                motor = obtener_motor_reparacion()
-                resultado = motor.reparar_unidad(
-                    letra,
-                    callback_progreso=self._actualizar_progreso
-                )
-                
-                self.root.after(0, self._agregar_log,
-                              f"Reparación de {letra} completada. Estado: {resultado.estado.value}",
-                              "INFO" if resultado.estado.value == "completado" else "WARNING")
-                
-                self.root.after(0, self._agregar_log,
-                              f"Archivos movidos: {resultado.archivos_movidos}, "
-                              f"Carpetas movidas: {resultado.carpetas_movidas}, "
-                              f"Archivos eliminados: {len(resultado.archivos_eliminados)}, "
-                              f"Errores: {len(resultado.errores)}", "INFO")
-                
-                if resultado.errores:
-                    for err in resultado.errores:
-                        self.root.after(0, self._agregar_log, f"Error: {err}", "ERROR")
-                
-                self.root.after(0, lambda: self.status_var.set(
-                    f"Reparación {letra}: {resultado.estado.value}"))
-                
-                # Si la reparación fue exitosa, guardar la unidad como reparada
-                if resultado.estado == EstadoReparacion.COMPLETADO:
-                    marcar_unidad_reparada(letra)
-                    self.root.after(0, self._refrescar_unidades)
-                
-                self._cancelar_reparacion = False
-            except Exception as e:
-                self.root.after(0, lambda: self._agregar_log(f"Error reparando {letra}: {e}", "ERROR"))
-            finally:
-                self.root.after(0, lambda: setattr(self, '_proceso_en_ejecucion', False))
-        
-        threading.Thread(target=_trabajo, daemon=True).start()
-    
-    def _verificar_y_reparar(self, letra: str) -> None:
-        """Verifica si una unidad necesita reparación y la repara automáticamente."""
-        if es_unidad_reparada(letra):
-            self.root.after(0, self._agregar_log,
-                            f"Unidad {letra} ya fue reparada antes. Reparación automática omitida.", "INFO")
+
+        unidad = next(
+            (u for u in obtener_monitor_usb().obtener_unidades_actuales() if u.letra == letra),
+            None,
+        )
+        if not unidad or not unidad.es_reparable_con_seguridad:
+            messagebox.showwarning(
+                "Destino no permitido",
+                "Por seguridad solo se reparan medios extraíbles o discos USB físicos. "
+                "Los discos internos y las unidades de red se mantienen en modo diagnóstico.",
+            )
             return
-        
-        def _trabajo():
+        diagnostico = obtener_motor_reparacion().analizar_ruta(unidad.ruta_raiz)
+        if diagnostico.estado is not EstadoDeteccion.CONFIRMADA:
+            messagebox.showwarning(
+                "Firma no confirmada",
+                "No se realizó ningún cambio. La estructura debe contener Kaspersky/Usb Drive/3.0 "
+                "y los cinco archivos de firma para poder repararse de forma segura.\n\n"
+                f"Detalle: {diagnostico.detalle or 'Sin firma detectada.'}",
+            )
+            return
+        if not messagebox.askyesno(
+            "Confirmar reparación",
+            f"Unidad {letra}: se encontró la firma completa.\n\n"
+            "Se restaurarán los archivos de Usb Drive y se eliminarán solo 3.dat a 7.dat. "
+            "El contenido no reconocido se conservará.\n\n¿Desea continuar?",
+        ):
+            return
+        self._reparar_unidad_internal(letra)
+
+    def _registrar_resultado_reparacion(self, resultado: ResultadoReparacion) -> None:
+        """Muestra en el hilo de interfaz el resultado ya calculado."""
+        nivel = "INFO" if resultado.estado is EstadoReparacion.COMPLETADO else "WARNING"
+        self._agregar_log(
+            f"Reparación de {resultado.unidad}: {resultado.estado.value}", nivel
+        )
+        self._agregar_log(
+            f"Archivos movidos: {resultado.archivos_movidos}; carpetas movidas: "
+            f"{resultado.carpetas_movidas}; archivos eliminados: "
+            f"{len(resultado.archivos_eliminados)}; errores: {len(resultado.errores)}",
+            "INFO",
+        )
+        for error in resultado.errores:
+            self._agregar_log(f"Detalle: {error}", "ERROR")
+        self.status_var.set(f"Reparación {resultado.unidad}: {resultado.estado.value}")
+        if resultado.estado is EstadoReparacion.COMPLETADO:
+            marcar_unidad_reparada(resultado.unidad)
+        self._refrescar_unidades()
+
+    def _reparar_unidad_internal(self, letra: str) -> None:
+        """Ejecuta una reparación ya confirmada en un hilo secundario."""
+        self._proceso_en_ejecucion = True
+        self._cancelar_reparacion = False
+        self.status_var.set(f"Reparando {letra}…")
+
+        def _trabajo() -> None:
             try:
-                ruta = f"{letra}\\"
-                kaspersky_path = os.path.join(ruta, "Kaspersky", "Usb Drive")
-                if os.path.exists(kaspersky_path):
-                    self.root.after(0, self._agregar_log,
-                                    f"Infección detectada en {letra} - Reparación automática", "WARNING")
-                    self.root.after(0, lambda: self._reparar_unidad_internal(letra))
-            except Exception as e:
-                logger.error(f"Error verificando {letra}: {e}")
-        
+                resultado = obtener_motor_reparacion().reparar_unidad(
+                    letra, callback_progreso=self._actualizar_progreso
+                )
+                self.root.after(0, self._registrar_resultado_reparacion, resultado)
+            except Exception as exc:
+                self.root.after(0, self._agregar_log,
+                                f"Error reparando {letra}: {exc}", "ERROR")
+            finally:
+                self.root.after(0, lambda: setattr(self, "_proceso_en_ejecucion", False))
+                self.root.after(0, lambda: setattr(self, "_cancelar_reparacion", False))
+
         threading.Thread(target=_trabajo, daemon=True).start()
-    
+
+    def _verificar_y_reparar(self, letra: str) -> None:
+        """Notifica una detección; nunca repara automáticamente al conectar USB."""
+        try:
+            unidad = next(
+                (u for u in obtener_monitor_usb().obtener_unidades_actuales() if u.letra == letra),
+                None,
+            )
+            if not unidad or not unidad.es_reparable_con_seguridad:
+                return
+            diagnostico = obtener_motor_reparacion().analizar_ruta(unidad.ruta_raiz)
+            if diagnostico.estado is EstadoDeteccion.CONFIRMADA:
+                self._agregar_log(
+                    f"Firma completa detectada en {letra}. Se requiere confirmación manual para reparar.",
+                    "WARNING",
+                )
+                self.status_var.set(f"Firma detectada en {letra}; revise la pestaña Reparación Unidades.")
+            elif diagnostico.estado is EstadoDeteccion.SOSPECHOSA:
+                self._agregar_log(
+                    f"Estructura incompleta en {letra}; no se modificó ningún archivo.", "WARNING"
+                )
+        except Exception as exc:
+            logger.error(f"Error verificando {letra}: {exc}")
+
     def _actualizar_progreso(self, pct: int, mensaje: str) -> None:
-        """Actualiza la barra de progreso y el texto."""
+        """Actualiza la barra de progreso desde cualquier hilo."""
         self.root.after(0, self.progreso_var.set, pct)
         self.root.after(0, self.lbl_progreso.config, {"text": mensaje})
-    
+
     # ==================== FUNCIONES DE LOG ====================
     
     def _limpiar_log(self) -> None:
@@ -982,7 +1075,7 @@ class AntivirusGUI:
     def _acerca_de(self) -> None:
         """Muestra el diálogo Acerca de."""
         messagebox.showinfo("Acerca de", 
-                           "Antivirus EACoreServer v1.0\n"
+                           "Antivirus EACoreServer v1.1\n"
                            "Protección contra malware USB\n"
                            "y gestión de procesos EACoreServer.exe\n\n"
                            "Desarrollado en Python 3.12+\n"
@@ -1041,7 +1134,7 @@ def ejecutar_aplicacion() -> None:
     root.configure(bg="#1e1e1e")
     
     # Título de la ventana
-    root.title("Antivirus EACoreServer v1.0 - Protección USB y Procesos")
+    root.title("Antivirus EACoreServer v1.1 - Protección USB y Procesos")
     
     # Dimensiones deseadas de la ventana
     VENTANA_ANCHO = 1280

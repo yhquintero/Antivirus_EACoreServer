@@ -122,6 +122,15 @@ class UnidadExtraible:
     espacio_libre: int = 0
     numero_serie: str = ""
     tipo_drive: int = DRIVE_REMOVABLE
+    # Los discos USB externos pueden aparecer como DRIVE_FIXED. Este campo se
+    # calcula a partir del bus físico para que la GUI no trate el disco interno
+    # o una unidad de red como destino de reparación automática.
+    es_usb_fisico: bool = False
+
+    @property
+    def es_reparable_con_seguridad(self) -> bool:
+        """Solo permite reparación guiada en medios extraíbles o USB físicos."""
+        return self.tipo_drive == DRIVE_REMOVABLE or self.es_usb_fisico
 
     def __hash__(self):
         return hash(self.letra)
@@ -408,11 +417,29 @@ def _obtener_tipo_unidad(letra: str) -> int:
             return DRIVE_UNKNOWN
 
 
+# Cache breve: consultar el bus físico en cada refresco de la GUI puede ser
+# costoso y algunos lectores de tarjetas responden lentamente.
+_cache_usb_fisico: dict[str, bool] = {}
+
+
+def _determinar_si_es_usb(letra: str, tipo: int) -> bool:
+    """Clasifica de forma conservadora si la letra pertenece a un USB físico."""
+    if tipo == DRIVE_REMOVABLE:
+        return True
+    if tipo != DRIVE_FIXED:
+        return False
+    if letra in _cache_usb_fisico:
+        return _cache_usb_fisico[letra]
+    es_usb = _es_usb_por_bus_fisico(letra) or _es_usb_por_wmi(letra)
+    _cache_usb_fisico[letra] = es_usb
+    return es_usb
+
+
 def _obtener_unidades_extraibles_interno() -> List[UnidadExtraible]:
     """
-    Obtiene todas las unidades disponibles con letra (A-Z): memorias USB y
-    tarjetas (extraíbles), discos fijos (SSD/HDD internos o externos USB) y
-    unidades de red. Se omiten solo CD-ROM sin medio y RAM disks.
+    Obtiene las unidades con letra disponibles para diagnóstico. La lista puede
+    incluir discos fijos y red, pero solo los medios extraíbles/USB físicos se
+    marcan como reparables para evitar cambios accidentales en el sistema.
     """
     unidades = []
     unidades_existentes = []
@@ -436,9 +463,10 @@ def _obtener_unidades_extraibles_interno() -> List[UnidadExtraible]:
             )
             logger.debug(f"Unidad {letra}: sin metadatos, agregada con datos mínimos")
 
+        info.es_usb_fisico = _determinar_si_es_usb(letra, tipo)
         unidades.append(info)
         logger.debug(
-            f"Unidad detectada: {info.letra} tipo={tipo} "
+            f"Unidad detectada: {info.letra} tipo={tipo} usb_fisico={info.es_usb_fisico} "
             f"etiqueta='{info.etiqueta}' fs={info.sistema_archivos}"
         )
 
