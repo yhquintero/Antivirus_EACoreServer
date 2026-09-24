@@ -21,13 +21,19 @@ logger = obtener_logger()
 
 
 class EstadoProceso(Enum):
-    """Estados posibles del proceso EACoreServer.exe"""
+    """Estados posibles del proceso EACoreServer.exe."""
     NO_ENCONTRADO = "no_encontrado"
     ENCONTRADO_INACTIVO = "encontrado_inactivo"  # Archivo existe pero no se ejecuta
     ACTIVO = "activo"  # Proceso corriendo
     ERROR_ACCESO = "error_acceso"
     FINALIZADO = "finalizado"
     ERROR_FINALIZAR = "error_finalizar"
+
+
+class ClasificacionRuta(Enum):
+    """Clasificación prudente; un nombre de archivo no demuestra malware."""
+    POSIBLE_COMPONENTE_EA = "posible_componente_ea"
+    SIN_VERIFICAR = "sin_verificar"
 
 
 @dataclass
@@ -44,6 +50,7 @@ class InfoRutaEACore:
     es_servicio: bool = False
     nombre_servicio: str = ""
     mensaje_error: str = ""
+    clasificacion: ClasificacionRuta = ClasificacionRuta.SIN_VERIFICAR
     
     def a_dict(self) -> Dict:
         """Convierte a diccionario para la tabla de la GUI"""
@@ -54,17 +61,51 @@ class InfoRutaEACore:
             "pid": self.pid if self.pid else "—",
             "usuario": self.usuario_propietario or "—",
             "tamano_kb": round(self.tamano_bytes / 1024, 1) if self.tamano_bytes else "—",
-            "es_servicio": "Sí" if self.es_servicio else "No",
-            "servicio": self.nombre_servicio or "—",
+            # "servicio" es la clave consumida por la tabla de la GUI. Antes
+            # se devolvía solo "es_servicio", lo que provocaba un KeyError al
+            # mostrar cualquier resultado de escaneo.
+            "servicio": self.nombre_servicio or ("Sí" if self.es_servicio else "—"),
+            "clasificacion": (
+                "Posible EA/Origin"
+                if self.clasificacion is ClasificacionRuta.POSIBLE_COMPONENTE_EA
+                else "Sin verificar"
+            ),
             "error": self.mensaje_error or "—",
         }
 
 
 class GestorProcesosEA:
-    """Gestiona la detección y finalización de EACoreServer.exe"""
-    
+    """Gestiona el diagnóstico de procesos llamados EACoreServer.exe.
+
+    EACoreServer.exe ha sido distribuido legítimamente por EA/Origin y juegos
+    de EA. Por ello, el nombre o una ruta publicada no se consideran evidencia
+    de malware y las acciones destructivas se bloquean para ubicaciones de
+    producto conocidas.
+    """
+
+    _MARCADORES_EA_CONOCIDOS = (
+        "\\electronic arts\\",
+        "\\origin games\\",
+        "\\origin\\",
+        "\\origin~",
+        "\\eadm\\",
+        "\\eadownloadmanager\\",
+        "\\origin\\legacypm\\",
+        "\\crytek\\crysis",
+    )
+
     def __init__(self) -> None:
         self._cache_servicios: Dict[str, str] = {}  # ruta -> nombre_servicio
+
+    @classmethod
+    def ruta_probablemente_legitima(cls, ruta: str) -> bool:
+        """Devuelve True para rutas típicas de componentes y juegos de EA.
+
+        No sustituye una comprobación de firma digital, pero evita que una ruta
+        de instalación conocida sea tratada como malware solo por su nombre.
+        """
+        ruta_normalizada = os.path.normcase(os.path.normpath(ruta))
+        return any(marcador in ruta_normalizada for marcador in cls._MARCADORES_EA_CONOCIDOS)
     
     def escanear_rutas(self, rutas: List[str]) -> List[InfoRutaEACore]:
         """
@@ -88,7 +129,9 @@ class GestorProcesosEA:
     def _verificar_ruta(self, ruta: str, indice: int) -> InfoRutaEACore:
         """Verifica una ruta individual."""
         info = InfoRutaEACore(ruta=ruta, indice=indice)
-        
+        if self.ruta_probablemente_legitima(ruta):
+            info.clasificacion = ClasificacionRuta.POSIBLE_COMPONENTE_EA
+
         try:
             # Verificar si el archivo existe
             if not os.path.exists(ruta):
@@ -148,49 +191,61 @@ class GestorProcesosEA:
                 continue
         return None
     
+    @staticmethod
+    def _extraer_ejecutable_servicio(comando: str) -> str:
+        """Extrae el ejecutable de un BinaryPathName de servicio de Windows."""
+        comando = (comando or "").strip()
+        if not comando:
+            return ""
+        if comando.startswith('"'):
+            cierre = comando.find('"', 1)
+            return comando[1:cierre] if cierre > 1 else ""
+        # Un ejecutable sin comillas no puede contener espacios de forma fiable;
+        # se conserva el primer token para no hacer comparaciones por subcadena.
+        return comando.split(None, 1)[0]
+
     def _verificar_si_es_servicio(self, ruta: str) -> str:
-        """Verifica si la ruta corresponde a un servicio de Windows instalado."""
-        ruta_norm = os.path.normpath(ruta).lower()
-        
-        # Usar cache si existe
+        """Verifica con igualdad exacta si la ruta es el binario de un servicio."""
+        ruta_norm = os.path.normcase(os.path.normpath(ruta))
         if ruta_norm in self._cache_servicios:
             return self._cache_servicios[ruta_norm]
-        
+
+        scm = None
         try:
-            # Abrir SCManager
             scm = win32service.OpenSCManager(
                 None, None, win32service.SC_MANAGER_ENUMERATE_SERVICE
             )
-            
-            # Enumerar servicios
             servicios = win32service.EnumServicesStatusEx(
                 scm, win32service.SC_ENUM_PROCESS_INFO, win32service.SERVICE_WIN32
             )
-            
             for servicio in servicios:
                 nombre_servicio = servicio[0]
+                h_servicio = None
                 try:
-                    # Obtener configuración del servicio
                     h_servicio = win32service.OpenService(
                         scm, nombre_servicio, win32service.SERVICE_QUERY_CONFIG
                     )
                     config = win32service.QueryServiceConfig(h_servicio)
-                    win32service.CloseServiceHandle(h_servicio)
-                    
-                    # config[3] es la ruta del binario
-                    ruta_servicio = config[3].lower()
-                    if ruta_norm in ruta_servicio or ruta_servicio in ruta_norm:
+                    ruta_servicio = self._extraer_ejecutable_servicio(config[3])
+                    if ruta_servicio and os.path.normcase(os.path.normpath(ruta_servicio)) == ruta_norm:
                         self._cache_servicios[ruta_norm] = nombre_servicio
                         return nombre_servicio
-                        
                 except Exception:
                     continue
-            
-            win32service.CloseServiceHandle(scm)
-            
+                finally:
+                    if h_servicio:
+                        try:
+                            win32service.CloseServiceHandle(h_servicio)
+                        except Exception:
+                            pass
         except Exception as e:
             logger.debug(f"Error verificando servicios para {ruta}: {e}")
-        
+        finally:
+            if scm:
+                try:
+                    win32service.CloseServiceHandle(scm)
+                except Exception:
+                    pass
         return ""
     
     def _obtener_propietario(self, ruta: str) -> str:
@@ -349,11 +404,15 @@ class GestorProcesosEA:
                 time.sleep(espera)
         return False
     
-    def detener_y_eliminar_archivos(self, ruta_exe: str) -> Dict[str, object]:
-        """
-        Detiene el proceso y el servicio asociado a la ruta (si existen) y luego
-        elimina por completo EACoreServer.exe y su archivo contiguo EACore.dat
-        (el fichero principal que contiene la base del virus), ambos de la misma carpeta.
+    def detener_y_eliminar_archivos(
+        self, ruta_exe: str, permitir_componente_ea: bool = False
+    ) -> Dict[str, object]:
+        """Detiene y elimina una instalación no confiable bajo confirmación.
+
+        El nombre ``EACoreServer.exe`` pertenece también a software legítimo de
+        EA. Por defecto, una ruta típica de EA/Origin queda protegida; el
+        llamador debe optar explícitamente por ``permitir_componente_ea`` tras
+        una revisión humana para anular esa protección.
         """
         resultados = {
             "ruta_exe": ruta_exe,
@@ -361,9 +420,18 @@ class GestorProcesosEA:
             "servicio_deshabilitado": False,
             "exe_eliminado": False,
             "dat_eliminado": False,
+            "accion_bloqueada": False,
             "detalles": [],
         }
-        
+        if self.ruta_probablemente_legitima(ruta_exe) and not permitir_componente_ea:
+            resultados["accion_bloqueada"] = True
+            resultados["detalles"].append(
+                "Acción bloqueada: la ruta parece pertenecer a una instalación legítima de EA/Origin. "
+                "Revise firma digital y origen del archivo antes de eliminarlo."
+            )
+            logger.warning(f"Eliminación bloqueada para posible componente EA: {ruta_exe}")
+            return resultados
+
         # 1) Finalizar el proceso si está activo
         info = InfoRutaEACore(ruta=ruta_exe, indice=0)
         try:

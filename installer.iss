@@ -6,7 +6,7 @@
 [Setup]
 AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}}
 AppName=Antivirus EACoreServer
-AppVersion=1.0.0
+AppVersion=1.1.0
 DefaultDirName={pf}\Antivirus EACoreServer
 DefaultGroupName=Antivirus EACoreServer
 OutputDir=dist
@@ -41,7 +41,7 @@ Filename: "{app}\Antivirus_EACoreServer.exe"; Parameters: "/quit"; Flags: runhid
 
 [Registry]
 Root: HKLM; Subkey: "SOFTWARE\AntivirusEACoreServer"; ValueType: string; ValueName: "InstallDir"; ValueString: "{app}"; Flags: uninsdeletekeyifempty
-Root: HKLM; Subkey: "SOFTWARE\AntivirusEACoreServer"; ValueType: string; ValueName: "Version"; ValueString: "1.0.0"
+Root: HKLM; Subkey: "SOFTWARE\AntivirusEACoreServer"; ValueType: string; ValueName: "Version"; ValueString: "1.1.0"
 Root: HKLM; Subkey: "SOFTWARE\AntivirusEACoreServer"; ValueType: string; ValueName: "Publisher"; ValueString: "EACoreServer Security"
 
 [Code]

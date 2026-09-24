@@ -1,6 +1,6 @@
 """
-Módulo de web scraping para obtener rutas candidatas de EACoreServer.exe
-desde http://processchecker.com/file/EACoreServer.exe.html
+Módulo de consulta para obtener rutas candidatas de EACoreServer.exe
+desde la versión HTTPS de processchecker.com.
 """
 
 import re
@@ -11,8 +11,9 @@ from logger import obtener_logger
 
 logger = obtener_logger()
 
-URL_PROCESSCHECKER = "http://processchecker.com/file/EACoreServer.exe.html"
-TIMEOUT_SEGUNDOS = 15
+# Solo HTTPS: la lista remota no debe poder ser alterada en tránsito.
+URL_PROCESSCHECKER = "https://processchecker.com/file/EACoreServer.exe.html"
+TIMEOUT_SEGUNDOS = 10
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -74,7 +75,7 @@ class ScraperEACoreServer:
         """Extrae las rutas del HTML de processchecker.com"""
         soup = BeautifulSoup(html, "html.parser")
         rutas = []
-        
+
         # Buscar en tablas, listas o divs que contengan rutas de archivos
         # Processchecker suele mostrar las rutas en una tabla o lista
         
@@ -83,20 +84,20 @@ class ScraperEACoreServer:
             for fila in tabla.find_all("tr"):
                 celdas = fila.find_all(["td", "th"])
                 for celda in celdas:
-                    texto = celda.get_text(strip=True)
+                    texto = self._normalizar_ruta(celda.get_text(" ", strip=True))
                     if self._es_ruta_valida(texto):
                         rutas.append(texto)
         
         # Estrategia 2: Buscar en elementos con clase/path
         for elem in soup.find_all(text=re.compile(r"[A-Za-z]:\\.*EACoreServer\.exe", re.IGNORECASE)):
-            texto_limpio = elem.strip()
+            texto_limpio = self._normalizar_ruta(str(elem))
             if self._es_ruta_valida(texto_limpio):
                 rutas.append(texto_limpio)
         
         # Estrategia 3: Buscar en todos los textos que parezcan rutas de Windows
         patron_ruta = re.compile(r"[A-Za-z]:(?:\\|\/)(?:[^\\/:*?\"<>|\r\n]+\\)*EACoreServer\.exe", re.IGNORECASE)
         for match in patron_ruta.finditer(html):
-            ruta = match.group(0).replace("/", "\\")
+            ruta = self._normalizar_ruta(match.group(0))
             if self._es_ruta_valida(ruta):
                 rutas.append(ruta)
         
@@ -111,18 +112,24 @@ class ScraperEACoreServer:
         
         return rutas_unicas
     
+    @staticmethod
+    def _normalizar_ruta(texto: str) -> str:
+        """Devuelve una ruta Windows limpia, sin texto accesorio de la página."""
+        texto = (texto or "").strip().strip('"\'`')
+        texto = texto.replace("/", "\\")
+        # Una celda puede traer puntuación o espacios al final de una frase.
+        return texto.rstrip(" .;,)")
+
     def _es_ruta_valida(self, texto: str) -> bool:
-        """Verifica si un texto es una ruta válida de EACoreServer.exe"""
+        """Verifica que el texto sea exactamente una ruta a EACoreServer.exe."""
         if not texto or len(texto) < 10:
             return False
-        # Debe contener EACoreServer.exe (case insensitive)
-        if "eacoreserver.exe" not in texto.lower():
-            return False
-        # Debe parecer ruta de Windows (letra de unidad + :\)
-        if not re.match(r"^[A-Za-z]:\\", texto):
-            return False
-        return True
-    
+        return bool(re.fullmatch(
+            r"[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)*EACoreServer\.exe",
+            texto,
+            re.IGNORECASE,
+        ))
+
     def _fusionar_con_defecto(self, rutas: List[str]) -> List[str]:
         """Fusiona las rutas obtenidas de la web con las 57 por defecto,
         deduplicando (insensible a mayúsculas) y respetando el orden."""
@@ -138,7 +145,7 @@ class ScraperEACoreServer:
     def _rutas_por_defecto(self) -> List[str]:
         """
         Las 57 rutas exactas de EACoreServer.exe reportadas en
-        http://processchecker.com/file/EACoreServer.exe.html
+        https://processchecker.com/file/EACoreServer.exe.html
         (orden de la tabla original: Path / Product / Vendor / Version / Size / MD5).
         """
         rutas_base = [

@@ -1,6 +1,6 @@
 # Antivirus EACoreServer
 
-Aplicación de escritorio en Python 3.12+ para la detección y eliminación de malware en unidades USB, discos fijos y de red, y la gestión de procesos `EACoreServer.exe`. Interfaz gráfica en español.
+Aplicación de escritorio en Python 3.12+ para **diagnosticar** la estructura USB `Kaspersky\\Usb Drive` y gestionar procesos llamados `EACoreServer.exe`. Interfaz gráfica en español y controles conservadores para evitar cambios accidentales.
 
 ---
 
@@ -13,21 +13,28 @@ Aplicación de escritorio en Python 3.12+ para la detección y eliminación de m
 5. [Empaquetado como Antivirus_EACoreServer.exe](#empaquetado-como-antivirus_eacoreserverexe)
 6. [Instalador con Inno Setup (Opcional)](#instalador-con-inno-setup-opcional)
 7. [Módulos del Proyecto](#módulos-del-proyecto)
-8. [Estructura del Malware que Combate](#estructura-del-malware-que-combate)
+8. [Firma USB atendida](#firma-usb-atendida)
 9. [Manejo de Errores](#manejo-de-errores)
 10. [Solución de Problemas](#solución-de-problemas)
+11. [Pruebas](#pruebas)
 
 ---
 
 ## Descripción
 
-**Antivirus EACoreServer** es una utilidad de seguridad diseñada para:
+**Antivirus EACoreServer** es una utilidad de diagnóstico y reparación conservadora diseñada para:
 
-- **Web Scraping**: Obtiene rutas candidatas de `EACoreServer.exe` desde `http://processchecker.com/file/EACoreServer.exe.html` y las fusiona con las 57 rutas por defecto (listado oficial de processchecker.com), garantizando cobertura total incluso sin conexión.
-- **Gestión de Procesos**: Detecta y finaliza el proceso `EACoreServer.exe` en cualquiera de las rutas identificadas. Puede **detener el servicio y eliminar por completo** `EACoreServer.exe` + `EACore.dat` (el fichero que contiene la base del virus) de la carpeta seleccionada o del servicio de `C:\ProgramData\EACoreService`.
-- **Monitoreo de Unidades**: Lista **todas las unidades con letra (A–Z)**: memorias USB y tarjetas (extraíbles), discos fijos (SSD/HDD internos o externos USB) y unidades de red. Cada unidad se muestra con etiqueta, sistema de archivos, tamaño y número de serie.
-- **Reparación Automática**: Cuando se detecta una unidad infectada con el malware `Kaspersky\Usb Drive`, restaura los archivos originales, elimina las bases de datos del virus y limpia la estructura maliciosa. El estado de las unidades reparadas se **guarda en disco** (se recuerda entre sesiones).
-- **Temas de interfaz**: Selector de tema **Claro / Oscuro / Sistema** (menú *Ver → Tema*). La preferencia se guarda en `%USERPROFILE%\Antivirus_EACoreServer_Logs\config.json` y se recuerda en cada inicio.
+- **Consulta HTTPS de rutas**: obtiene rutas históricas candidatas de `EACoreServer.exe` desde `https://processchecker.com/file/EACoreServer.exe.html` y las combina con una lista local para funcionar sin conexión. Las rutas son datos de diagnóstico, **no indicadores de malware**.
+- **Gestión protegida de procesos**: muestra procesos `EACoreServer.exe` y permite finalizarlos con confirmación. Las rutas típicas de EA/Origin y sus juegos se identifican como posibles componentes legítimos y quedan protegidas contra eliminación por nombre.
+- **Monitoreo de unidades**: lista letras de unidad para diagnóstico. Solo memorias extraíbles y discos USB físicos se habilitan para reparación; discos internos y de red son de solo diagnóstico.
+- **Reparación conservadora y manual**: solo repara después de encontrar la firma completa `Kaspersky\Usb Drive\3.0` con `3.dat` a `7.dat`, y tras una confirmación explícita. Restaura archivos, resuelve colisiones sin sobrescribir y elimina únicamente esos archivos de firma y carpetas vacías. No existe reparación automática al insertar una unidad.
+- **Temas de interfaz**: selector **Claro / Oscuro / Sistema** (menú *Ver → Tema*). La preferencia se guarda en `%USERPROFILE%\Antivirus_EACoreServer_Logs\config.json`.
+
+## Principios de seguridad
+
+`EACoreServer.exe` fue distribuido por productos legítimos de EA/Origin. Por eso, un nombre de archivo, una ruta histórica o una carpeta llamada `Kaspersky` no demuestran por sí solos una infección. Antes de eliminar un archivo, valide su firma digital, origen y contexto. La herramienta no sustituye a Microsoft Defender ni a un antivirus con firmas actualizadas.
+
+
 
 ---
 
@@ -205,40 +212,45 @@ El instalador estará en la carpeta `dist`.
 |---------|-------------|
 | `main.py` | Punto de entrada principal. Verifica permisos y lanza la GUI |
 | `gui.py` | Interfaz gráfica completa con tkinter (3 pestañas) |
-| `scraper.py` | Web scraping de rutas EACoreServer.exe desde processchecker.com |
-| `process_manager.py` | Detección y finalización de procesos EACoreServer.exe |
+| `scraper.py` | Consulta HTTPS y validación de rutas candidatas de processchecker.com |
+| `process_manager.py` | Diagnóstico de procesos y protección de rutas típicas EA/Origin |
 | `usb_monitor.py` | Monitor de inserción/remoción de unidades USB |
-| `repair_engine.py` | Motor de reparación de unidades USB infectadas |
+| `repair_engine.py` | Detección por firma completa y reparación no destructiva de USB |
 | `logger.py` | Sistema de logging centralizado (consola + archivo) |
 | `requirements.txt` | Dependencias Python |
 | `Antivirus_EACoreServer.spec` | Configuración de PyInstaller |
+| `tests/test_repair_engine.py` | Pruebas de firma, colisiones y preservación de contenido |
 
 ---
 
-## Estructura del Malware que Combate
+## Firma USB atendida
+
+La reparación se habilita únicamente cuando se encuentra la siguiente firma completa en un **medio USB físico o extraíble**:
 
 ```
 [Unidad]:\
-├── Kaspersky\                    (atributos: -a -r -h -s)
-│   └── Usb Drive\                (atributos: -a -r -h -s)
-│       ├── [archivos y carpetas originales del usuario]
-│       └── 3.0\
-│           ├── 3.dat             ← Base de datos del virus
-│           ├── 4.dat             ← Base de datos del virus
-│           ├── 5.dat             ← Base de datos del virus
-│           ├── 6.dat             ← Base de datos del virus
-│           └── 7.dat             ← Base de datos del virus
-└── [archivos originales]         ← Deberían estar aquí
+└── Kaspersky\
+    └── Usb Drive\
+        ├── [archivos y carpetas originales del usuario]
+        └── 3.0\
+            ├── 3.dat
+            ├── 4.dat
+            ├── 5.dat
+            ├── 6.dat
+            └── 7.dat
 ```
 
-### Proceso de reparación:
+Una carpeta con el mismo nombre pero sin los cinco archivos de firma queda marcada como **requiere revisión** y no se modifica.
 
-1. **Verificar** existencia de `Kaspersky\Usb Drive\`
-2. **Quitar atributos** (`-h -s -r -a`) de `Kaspersky` y `Usb Drive`
-3. **Mover** todo el contenido de `Usb Drive\` a la raíz de la unidad
-4. **Eliminar** `3.dat`, `4.dat`, `5.dat`, `6.dat`, `7.dat`
-5. **Eliminar** carpetas `3.0\`, `Usb Drive\`, `Kaspersky\` en ese orden
-6. **Registrar** todas las acciones en el log
+### Proceso de reparación seguro
+
+1. Valida la firma completa y solicita confirmación del usuario.
+2. Quita atributos de oculto/sistema/solo lectura en la estructura validada.
+3. Mueve el contenido de `Usb Drive\` a la raíz sin sobrescribir: ante colisiones crea un nombre con sufijo (`_1`, `_2`, …).
+4. Elimina solo `3.dat` a `7.dat` dentro de `3.0\`.
+5. Elimina `3.0\`, `Usb Drive\` y `Kaspersky\` **solo si están vacías**. Si queda un elemento desconocido o bloqueado, lo conserva y registra el incidente.
+6. Guarda el estado de unidades completadas y todas las acciones en el log.
+
 
 ---
 
@@ -246,9 +258,9 @@ El instalador estará en la carpeta `dist`.
 
 La aplicación maneja los siguientes escenarios de error:
 
-- **Unidades sin carpeta Kaspersky**: No generan fallos, se registran como "sin infección"
-- **Archivos bloqueados**: Se reportan sin detener el proceso completo
-- **Permisos insuficientes**: Se notifica al usuario y se intenta con `taskkill /F`
+- **Sin firma completa**: No genera fallos ni cambios; se informa como unidad limpia o que requiere revisión.
+- **Archivos o carpetas bloqueados/desconocidos**: Se conservan y se reportan; no se fuerza un borrado recursivo.
+- **Permisos insuficientes**: Se notifica al usuario; la finalización de procesos puede intentar `taskkill /F`
 - **Red inactiva**: Se usan rutas por defecto locales (fallback)
 - **Unidades sin formato**: Se detectan como no accesibles y se saltan
 
@@ -257,25 +269,37 @@ La aplicación maneja los siguientes escenarios de error:
 ## Solución de Problemas
 
 ### La aplicación no muestra todas las unidades
-- Se listan todas las letras A–Z (USB extraíbles, discos fijos SSD/HDD y unidades de red); los CD-ROM vacíos se omiten
+- Se listan letras de USB, discos fijos y red para diagnóstico; los CD-ROM vacíos se omiten. Solo medios USB/extraíbles se pueden reparar.
 - Verifique que la unidad tiene letra asignada (Administración de discos)
 - Ejecute como Administrador
 - Pulse *Refrescar Unidades* en el menú *Herramientas*
 
 ### No se puede finalizar EACoreServer.exe
 - Ejecute como Administrador
-- El proceso puede estar protegido por EA AntiCheat
-- Verifique si es un servicio de Windows y deténelo desde `services.msc`
+- Puede ser un componente legítimo de EA/Origin o de un juego. Revise el editor en Propiedades → Firmas digitales antes de intervenir.
+- Verifique si es un servicio de Windows desde `services.msc`
 
 ### La reparación USB falla
-- Asegúrese de que la unidad no está en uso por otro programa
-- Verifique que tiene permisos de escritura en la unidad
-- Revise el log para detalles del error
+- La unidad debe ser extraíble/USB físico y tener los cinco archivos de firma.
+- Asegúrese de que la unidad no está en uso y que tiene permisos de escritura.
+- Si se informa contenido no reconocido, haga una copia y revíselo: la herramienta lo conserva deliberadamente.
 
 ### El scraping no funciona
 - Se usa fallback automático con 57 rutas locales
 - Verifique conectividad a internet
-- La URL `http://processchecker.com/file/EACoreServer.exe.html` puede estar caída
+- La URL `https://processchecker.com/file/EACoreServer.exe.html` puede estar caída
+
+---
+
+## Pruebas
+
+Las pruebas del motor no requieren una unidad USB física ni `pywin32`:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+Cubren ausencia de firma, firma incompleta sin modificaciones, restauración con colisiones y preservación de contenido no reconocido.
 
 ---
 
@@ -307,5 +331,5 @@ Para problemas o preguntas, revise:
 ---
 
 *Última actualización: Septiembre 2026*
-*Versión: 1.0*
+*Versión: 1.1.0*
 *Python 3.12+ | Windows 10/11*
