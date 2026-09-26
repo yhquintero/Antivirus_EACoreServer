@@ -278,7 +278,7 @@ class AntivirusGUI:
         menu_herramientas.add_command(label="Refrescar Unidades USB", command=self._refrescar_unidades)
         menu_herramientas.add_separator()
         menu_herramientas.add_command(
-            label="Detener y Eliminar EACoreService (exe + .dat)",
+            label="Detener y Eliminar EACoreService (exe + .dat + .dll)",
             command=self._eliminar_servicio_programdata)
         menubar.add_cascade(label="Herramientas", menu=menu_herramientas)
         
@@ -398,14 +398,14 @@ class AntivirusGUI:
                    command=self._finalizar_seleccionado).pack(side="left", padx=5)
         ttk.Button(accion_frame, text="Finalizar por Ruta", 
                    command=self._finalizar_por_ruta).pack(side="left", padx=5)
-        ttk.Button(accion_frame, text="Eliminar Exe + .dat Seleccionado", 
+        ttk.Button(accion_frame, text="Eliminar .exe + .dat + .dll Seleccionado", 
                    command=self._eliminar_exe_dat_seleccionado).pack(side="left", padx=5)
         
         # Acción excepcional para la ruta no estándar de ProgramData. Requiere
         # confirmación; el nombre EACoreServer.exe no basta para identificar malware.
         servicio_frame = ttk.Frame(self.tab_procesos)
         servicio_frame.pack(fill="x", pady=(0, 5))
-        ttk.Button(servicio_frame, text="Detener y Eliminar EACoreService (exe + .dat)",
+        ttk.Button(servicio_frame, text="Detener y Eliminar EACoreService (.exe + .dat + .dll)",
                    command=self._eliminar_servicio_programdata).pack(side="left", padx=5)
         ttk.Label(servicio_frame,
                   text="Detiene el servicio de C:\\ProgramData\\EACoreService y borra ambos ficheros por completo.")\
@@ -708,7 +708,7 @@ class AntivirusGUI:
                 messagebox.showinfo("Info", "El proceso no está activo o no se encontró.")
     
     def _eliminar_exe_dat_seleccionado(self) -> None:
-        """Detiene proceso/servicio y elimina EACoreServer.exe + EACore.dat de la fila seleccionada."""
+        """Detiene proceso/servicio y elimina EACoreServer.exe + EACore.dat + EACore.dll de la fila seleccionada."""
         seleccion = self.tree_procesos.selection()
         if not seleccion:
             messagebox.showwarning("Aviso", "No hay ninguna ruta seleccionada.")
@@ -727,11 +727,12 @@ class AntivirusGUI:
                 "Revise la firma digital y use el desinstalador del producto si corresponde.",
             )
             return
-        ruta_dat = os.path.join(os.path.dirname(ruta), "EACore.dat")
+        ruta_dat1 = os.path.join(os.path.dirname(ruta), "EACore.dat")
+        ruta_dat2 = os.path.join(os.path.dirname(ruta), "EACore.dll")
         confirmar = messagebox.askyesno(
             "Eliminar archivos por completo",
             "Se detendrá el proceso/servicio asociado y se eliminarán por completo:\n\n"
-            f"  {ruta}\n  {ruta_dat}\n\n"
+            f"  {ruta}\n  {ruta_dat1}\n  {ruta_dat2}\n\n"
             "¿Desea continuar?"
         )
         if not confirmar:
@@ -739,7 +740,7 @@ class AntivirusGUI:
         self._ejecutar_trabajo_eliminacion(ruta, "fila seleccionada")
     
     def _eliminar_servicio_programdata(self) -> None:
-        """Detiene el servicio EACoreService y elimina exe + dat de ProgramData."""
+        """Detiene el servicio EACoreService y elimina exe + dat + dll de ProgramData."""
         ruta = r"C:\ProgramData\EACoreService\EACoreServer.exe"
         if not os.path.exists(ruta):
             messagebox.showinfo(
@@ -747,11 +748,12 @@ class AntivirusGUI:
                 "El servicio EACoreService no está instalado en este equipo\n"
                 "(no existe C:\\ProgramData\\EACoreService\\EACoreServer.exe).")
             return
-        ruta_dat = os.path.join(os.path.dirname(ruta), "EACore.dat")
+        ruta_dat1 = os.path.join(os.path.dirname(ruta), "EACore.dat")
+        ruta_dat2 = os.path.join(os.path.dirname(ruta), "EACore.dll")
         confirmar = messagebox.askyesno(
             "Detener y eliminar EACoreService",
             "Se detendrá y deshabilitará el servicio EACoreService y se eliminarán:\n\n"
-            f"  {ruta}\n  {ruta_dat}\n\n"
+            f"  {ruta}\n  {ruta_dat1}\n  {ruta_dat2}\n\n"
             "Nota: podría afectar a EA App / Origin hasta reiniciar el equipo.\n"
             "¿Desea continuar?"
         )
@@ -760,7 +762,7 @@ class AntivirusGUI:
         self._ejecutar_trabajo_eliminacion(ruta, "ProgramData")
     
     def _ejecutar_trabajo_eliminacion(self, ruta: str, origen: str) -> None:
-        """Ejecuta la eliminación completa (exe + .dat) en un hilo secundario."""
+        """Ejecuta la eliminación completa (.exe + .dat + .dll) en un hilo secundario."""
         if self._proceso_en_ejecucion:
             messagebox.showwarning("Aviso", "Ya hay una operación en ejecución.")
             return
@@ -777,7 +779,8 @@ class AntivirusGUI:
                     f"Servicio detenido: {resultados['servicio_detenido']} | "
                     f"Servicio deshabilitado: {resultados['servicio_deshabilitado']} | "
                     f"EACoreServer.exe eliminado: {resultados['exe_eliminado']} | "
-                    f"EACore.dat eliminado: {resultados['dat_eliminado']}", "INFO"))
+                    f"EACore.dat eliminado: {resultados['dat_eliminado']} | "
+                    f"EACore.dll eliminado: {resultados['dll_eliminado']}", "INFO"))
                 for detalle in resultados.get("detalles", []):
                     self.root.after(0, lambda d=detalle: self._agregar_log(f"  - {d}", "INFO"))
                 
@@ -967,14 +970,14 @@ class AntivirusGUI:
             messagebox.showwarning(
                 "Firma no confirmada",
                 "No se realizó ningún cambio. La estructura debe contener Kaspersky/Usb Drive/3.0 "
-                "y los cinco archivos de firma para poder repararse de forma segura.\n\n"
+                "y los archivos de firma para poder repararse de forma segura.\n\n"
                 f"Detalle: {diagnostico.detalle or 'Sin firma detectada.'}",
             )
             return
         if not messagebox.askyesno(
             "Confirmar reparación",
             f"Unidad {letra}: se encontró la firma completa.\n\n"
-            "Se restaurarán los archivos de Usb Drive y se eliminarán solo 3.dat a 7.dat. "
+            "Se restaurarán los archivos de Usb Drive y se eliminarán solo los ficheros 5.dat al 7.dat. "
             "El contenido no reconocido se conservará.\n\n¿Desea continuar?",
         ):
             return

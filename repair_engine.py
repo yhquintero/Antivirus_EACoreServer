@@ -2,7 +2,7 @@
 
 El motor no considera una carpeta llamada ``Kaspersky`` como prueba suficiente de
 infección. Solo modifica una unidad después de encontrar la firma completa:
-``Kaspersky/Usb Drive/3.0`` y los cinco archivos de datos conocidos. Esta
+``Kaspersky/Usb Drive/3.0`` y los archivos de datos conocidos. Esta
 precaución evita borrar carpetas legítimas que tengan un nombre parecido.
 """
 
@@ -128,14 +128,14 @@ class ResultadoReparacion:
 class MotorReparacionUSB:
     """Restaura archivos sin borrar contenido no reconocido.
 
-    La firma requerida contiene *todos* los archivos 3.dat a 7.dat. Cuando la
+    La firma requerida contiene *todos* los archivos 5.dat al 7.dat. Cuando la
     estructura está incompleta se informa como sospechosa y se deja intacta para
     revisión humana. Durante la limpieza solo se eliminan dichos archivos y las
     carpetas que queden vacías; nunca se usa ``rmtree`` sobre contenido que no
     haya sido identificado.
     """
 
-    ARCHIVOS_VIRUS = ("3.dat", "4.dat", "5.dat", "6.dat", "7.dat")
+    ARCHIVOS_VIRUS = ("5.dat", "6.dat", "7.dat")
     CARPETA_VIRUS_PRINCIPAL = "Kaspersky"
     CARPETA_USB_DRIVE = "Usb Drive"
     CARPETA_BASES_DATOS = "3.0"

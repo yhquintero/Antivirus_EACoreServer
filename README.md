@@ -27,7 +27,7 @@ Aplicación de escritorio en Python 3.12+ para **diagnosticar** la estructura US
 - **Consulta HTTPS de rutas**: obtiene rutas históricas candidatas de `EACoreServer.exe` desde `https://processchecker.com/file/EACoreServer.exe.html` y las combina con una lista local para funcionar sin conexión. Las rutas son datos de diagnóstico, **no indicadores de malware**.
 - **Gestión protegida de procesos**: muestra procesos `EACoreServer.exe` y permite finalizarlos con confirmación. Las rutas típicas de EA/Origin y sus juegos se identifican como posibles componentes legítimos y quedan protegidas contra eliminación por nombre.
 - **Monitoreo de unidades**: lista letras de unidad para diagnóstico. Solo memorias extraíbles y discos USB físicos se habilitan para reparación; discos internos y de red son de solo diagnóstico.
-- **Reparación conservadora y manual**: solo repara después de encontrar la firma completa `Kaspersky\Usb Drive\3.0` con `3.dat` a `7.dat`, y tras una confirmación explícita. Restaura archivos, resuelve colisiones sin sobrescribir y elimina únicamente esos archivos de firma y carpetas vacías. No existe reparación automática al insertar una unidad.
+- **Reparación conservadora y manual**: solo repara después de encontrar la firma completa `Kaspersky\Usb Drive\3.0` con `5.dat` al `7.dat`, y tras una confirmación explícita. Restaura archivos, resuelve colisiones sin sobrescribir y elimina únicamente esos archivos de firma y carpetas vacías. No existe reparación automática al insertar una unidad.
 - **Temas de interfaz**: selector **Claro / Oscuro / Sistema** (menú *Ver → Tema*). La preferencia se guarda en `%USERPROFILE%\Antivirus_EACoreServer_Logs\config.json`.
 
 ## Principios de seguridad
@@ -233,11 +233,11 @@ La reparación se habilita únicamente cuando se encuentra la siguiente firma co
     └── Usb Drive\
         ├── [archivos y carpetas originales del usuario]
         └── 3.0\
-            ├── 3.dat
-            ├── 4.dat
+            ├── Fichero en forma de número sin extensión, número aleatorio empezando en 0
             ├── 5.dat
             ├── 6.dat
             └── 7.dat
+            
 ```
 
 Una carpeta con el mismo nombre pero sin los cinco archivos de firma queda marcada como **requiere revisión** y no se modifica.
@@ -247,7 +247,7 @@ Una carpeta con el mismo nombre pero sin los cinco archivos de firma queda marca
 1. Valida la firma completa y solicita confirmación del usuario.
 2. Quita atributos de oculto/sistema/solo lectura en la estructura validada.
 3. Mueve el contenido de `Usb Drive\` a la raíz sin sobrescribir: ante colisiones crea un nombre con sufijo (`_1`, `_2`, …).
-4. Elimina solo `3.dat` a `7.dat` dentro de `3.0\`.
+4. Elimina solo `5.dat` al `7.dat` dentro de `3.0\`.
 5. Elimina `3.0\`, `Usb Drive\` y `Kaspersky\` **solo si están vacías**. Si queda un elemento desconocido o bloqueado, lo conserva y registra el incidente.
 6. Guarda el estado de unidades completadas y todas las acciones en el log.
 

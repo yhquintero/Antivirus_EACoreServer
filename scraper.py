@@ -184,7 +184,7 @@ class ScraperEACoreServer:
             r"G:\Crysis 2\bin32\EACore\EACoreServer.exe",
             r"D:\Program Files (x86)\Origin Games\Bejeweled 3\Bejeweled 3 DE\Core\EACoreServer.exe",
             r"D:\GAMES\nfs\Core\EACoreServer.exe",
-            # 31-40: Battlefield 3 nosTEAM, EADM, Mass Effect, Need for Speed, Battlefield
+            # 31-39: Battlefield 3 nosTEAM, EADM, Mass Effect, Need for Speed, Battlefield
             r"E:\New folder\New folder\Battlefield 3 nosTEAM\Core\EACoreServer.exe",
             r"D:\Games\EADM\EACoreServer.exe",
             r"C:\PROGRA~2\ORIGIN~1\MASSEF~1\binaries\Win32\Core\EACoreServer.exe",
@@ -193,21 +193,16 @@ class ScraperEACoreServer:
             r"C:\PROGRA~2\ORIGIN~1\BATTLE~1\Core\EACoreServer.exe",
             r"C:\PROGRA~2\NEEDFO~1\Core\EACoreServer.exe",
             r"E:\Battlefield 3\Core\EACoreServer.exe",
-            r"C:\PROGRA~2\ELECTR~1\EADM\EACoreServer.exe",
             r"C:\PROGRA~2\Origin\LegacyPM\EACoreServer.exe",
-            # 41-50: Origin LegacyPM (x64), EADM, Origin games, Battlefield, Plants vs Zombies
+            # 40-46: Origin LegacyPM (x64), EADM, Origin games, Battlefield, Plants vs Zombies
             r"C:\PROGRA~1\Origin\LegacyPM\EACoreServer.exe",
             r"C:\PROGRA~2\ELECTR~1\EADM\EACoreServer.exe",
             r"C:\PROGRA~1\ELECTR~1\EADM\EACoreServer.exe",
             r"E:\Program Files (x86)\Origin Games\Battlefield 3\Core\EACoreServer.exe",
-            r"C:\PROGRA~2\ELECTR~1\EADM\EACoreServer.exe",
-            r"C:\PROGRA~1\ELECTR~1\EADM\EACoreServer.exe",
             r"C:\PROGRA~2\ORIGIN~1\PLANTS~1.ZOM\PLANTS~2.ZOM\Core\EACoreServer.exe",
             r"D:\torrent oyun\crysis 2\bin32\EACore\EACoreServer.exe",
             r"D:\BATTLE~1\Core\EACoreServer.exe",
-            r"C:\PROGRA~1\ELECTR~1\EADM\EACoreServer.exe",
-            # 51-57: EADM, FIFA 12, Origin Games, unidad A:, ProgramData (servicio EA)
-            r"C:\PROGRA~1\ELECTR~1\EADM\EACoreServer.exe",
+            # 47-52: EADM, FIFA 12, Origin Games, unidad A:, ProgramData (servicio EA)
             r"D:\BFV\FIFA 12\Game\Core\EACoreServer.exe",
             r"D:\Program Files (x86)\Origin Games\Battlefield 3\Core\EACoreServer.exe",
             r"A:\GAMES\BATTLE~1\Core\EACoreServer.exe",

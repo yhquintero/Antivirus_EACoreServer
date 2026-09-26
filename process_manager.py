@@ -467,16 +467,18 @@ class GestorProcesosEA:
         
         # 3) Esperar a que se liberen y eliminar ambos ficheros
         carpeta = os.path.dirname(ruta_exe)
-        ruta_dat = os.path.join(carpeta, "EACore.dat")
+        ruta_dat1 = os.path.join(carpeta, "EACore.dat")
+        ruta_dat2 = os.path.join(carpeta, "EACore.dll")
         resultados["exe_eliminado"] = self._eliminar_archivo_con_reintentos(ruta_exe)
-        resultados["dat_eliminado"] = self._eliminar_archivo_con_reintentos(ruta_dat)
+        resultados["dat_eliminado"] = self._eliminar_archivo_con_reintentos(ruta_dat1)
+        resultados["dll_eliminado"] = self._eliminar_archivo_con_reintentos(ruta_dat2)
         
         return resultados
     
     def detener_y_eliminar_servicio_programdata(self) -> Dict[str, object]:
         """
         Atajo: detiene el servicio EACoreService de ProgramData y elimina
-        EACoreServer.exe + EACore.dat de esa carpeta (ruta #57).
+        EACoreServer.exe + EACore.dat + EACore.dll de esa carpeta (ruta #57).
         """
         ruta = r"C:\ProgramData\EACoreService\EACoreServer.exe"
         if not os.path.exists(ruta):
