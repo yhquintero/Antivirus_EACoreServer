@@ -1,15 +1,27 @@
 """Reparación conservadora de unidades afectadas por Kaspersky/Usb Drive.
 
 El motor no considera una carpeta llamada ``Kaspersky`` como prueba suficiente de
-infección. Solo modifica una unidad después de encontrar la firma completa:
-``Kaspersky/Usb Drive/3.0`` y los archivos de datos conocidos. Esta
-precaución evita borrar carpetas legítimas que tengan un nombre parecido.
+infección. Solo modifica una unidad después de encontrar la firma **exacta**:
+``Kaspersky/Usb Drive/3.0`` con los archivos ``5.dat``, ``6.dat`` y ``7.dat`` y,
+además, un fichero de nombre puramente numérico **sin extensión** dentro de
+``3.0``. Esta precaución evita borrar carpetas legítimas que tengan un nombre
+parecido.
+
+La restauración nunca usa ``shutil.move`` a ciegas: cada archivo se copia, se
+fuerza su escritura a disco y se compara su **SHA-256** con el del origen. Solo
+cuando la suma coincide se retira el origen; si difiere, se elimina la copia
+defectuosa y el archivo original se conserva intacto.
+
+El módulo es multiplataforma: en Windows usa la API de atributos Win32 y en
+macOS/Linux normaliza permisos POSIX para permitir la restauración.
 """
 
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import os
+import re
 import shutil
 import stat
 import time
@@ -17,11 +29,23 @@ from ctypes import wintypes
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from logger import obtener_logger
+from usb_monitor import ES_WINDOWS, normalizar_identificador_unidad
 
 logger = obtener_logger()
+
+# Tamaño de bloque usado al calcular SHA-256: permite verificar archivos grandes
+# (vídeos o imágenes de disco restaurados desde el USB) sin cargarlos en memoria.
+TAMANO_BLOQUE_HASH = 1024 * 1024
+
+# Un fichero de firma numérico no tiene extensión y su nombre son solo dígitos.
+PATRON_ARCHIVO_NUMERICO = re.compile(r"^\d+$")
+
+# Letra de unidad Windows ("E", "E:" o "E:\"). En macOS/Linux el identificador es
+# un punto de montaje y no debe recortarse como si fuera una letra.
+_PATRON_LETRA_WINDOWS = re.compile(r"[A-Za-z]:?\\?")
 
 # Atributos de archivo de Windows. El módulo también puede importarse fuera de
 # Windows para ejecutar las pruebas de detección; la reparación real está
@@ -69,10 +93,16 @@ class DeteccionInfeccion:
     estado: EstadoDeteccion
     archivos_firma: Tuple[str, ...] = ()
     detalle: str = ""
+    archivos_numericos: Tuple[str, ...] = ()
 
     @property
     def confirmada(self) -> bool:
         return self.estado is EstadoDeteccion.CONFIRMADA
+
+    @property
+    def firma_completa(self) -> Tuple[str, ...]:
+        """Todos los ficheros que forman la firma exacta (.dat + numéricos)."""
+        return tuple(self.archivos_firma) + tuple(self.archivos_numericos)
 
 
 class EstadoReparacion(Enum):
@@ -98,6 +128,9 @@ class ResultadoReparacion:
     archivos_eliminados: List[str] = field(default_factory=list)
     carpetas_eliminadas: List[str] = field(default_factory=list)
     errores: List[str] = field(default_factory=list)
+    # Auditoría de la restauración verificada: origen -> SHA-256 confirmado.
+    archivos_verificados: List[str] = field(default_factory=list)
+    sumas_sha256: Dict[str, str] = field(default_factory=dict)
     tiempo_inicio: float = field(default_factory=time.time)
     tiempo_fin: Optional[float] = None
 
@@ -116,6 +149,14 @@ class ResultadoReparacion:
             self.archivos_movidos += 1
         logger.log_accion_usb(self.unidad, "MOVIDO", f"{origen} -> {destino}")
 
+    def agregar_verificado(self, origen: str, destino: str, suma_sha256: str) -> None:
+        """Registra que una copia quedó verificada por SHA-256 antes de retirar el origen."""
+        self.archivos_verificados.append(origen)
+        self.sumas_sha256[destino] = suma_sha256
+        logger.log_accion_usb(
+            self.unidad, "SHA256_VERIFICADO", f"{destino} = {suma_sha256}"
+        )
+
     def agregar_eliminado_archivo(self, ruta: str) -> None:
         self.archivos_eliminados.append(ruta)
         logger.log_accion_usb(self.unidad, "ELIMINADO_ARCHIVO", ruta)
@@ -128,17 +169,26 @@ class ResultadoReparacion:
 class MotorReparacionUSB:
     """Restaura archivos sin borrar contenido no reconocido.
 
-    La firma requerida contiene *todos* los archivos 5.dat al 7.dat. Cuando la
-    estructura está incompleta se informa como sospechosa y se deja intacta para
-    revisión humana. Durante la limpieza solo se eliminan dichos archivos y las
-    carpetas que queden vacías; nunca se usa ``rmtree`` sobre contenido que no
-    haya sido identificado.
+    La firma exacta requiere *todos* los archivos ``5.dat``, ``6.dat`` y
+    ``7.dat`` **y** al menos un fichero de nombre numérico sin extensión dentro
+    de ``3.0``. Cuando la estructura está incompleta se informa como sospechosa
+    y se deja intacta para revisión humana. Durante la limpieza solo se eliminan
+    dichos ficheros de firma y las carpetas que queden vacías; nunca se usa
+    ``rmtree`` sobre contenido que no haya sido identificado.
+
+    La restauración copia y verifica cada archivo con SHA-256 antes de retirar
+    el origen, de modo que un fallo de escritura o un medio degradado no puede
+    provocar pérdida de datos.
     """
 
     ARCHIVOS_VIRUS = ("5.dat", "6.dat", "7.dat")
     CARPETA_VIRUS_PRINCIPAL = "Kaspersky"
     CARPETA_USB_DRIVE = "Usb Drive"
     CARPETA_BASES_DATOS = "3.0"
+    # La firma también incluye un fichero numérico sin extensión (por ejemplo
+    # "1337" o "20240517"). Exigirlo evita confundir una carpeta legítima que
+    # solo contenga archivos .dat sueltos con la estructura real del malware.
+    REQUIERE_ARCHIVO_NUMERICO = True
 
     def __init__(self) -> None:
         self._cancelar = False
@@ -151,6 +201,26 @@ class MotorReparacionUSB:
     def analizar_unidad(self, letra_unidad: str) -> DeteccionInfeccion:
         """Analiza una letra de unidad sin modificar archivos."""
         return self.analizar_ruta(self._ruta_desde_unidad(letra_unidad))
+
+    @staticmethod
+    def _archivos_numericos(ruta_bases: Path) -> Tuple[str, ...]:
+        """Lista los ficheros de nombre puramente numérico y sin extensión.
+
+        Solo se consideran archivos regulares: un directorio llamado ``1234`` no
+        forma parte de la firma y jamás se eliminaría.
+        """
+        try:
+            entradas = sorted(ruta_bases.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return ()
+        return tuple(
+            entrada.name
+            for entrada in entradas
+            if not entrada.is_symlink()
+            and entrada.is_file()
+            and entrada.suffix == ""
+            and PATRON_ARCHIVO_NUMERICO.match(entrada.name)
+        )
 
     def analizar_ruta(self, ruta_raiz: str | Path) -> DeteccionInfeccion:
         """Analiza una ruta raíz; útil para la GUI y pruebas no destructivas."""
@@ -176,14 +246,33 @@ class MotorReparacionUSB:
             encontrados = tuple(
                 nombre for nombre in self.ARCHIVOS_VIRUS if (ruta_bases / nombre).is_file()
             )
-            if len(encontrados) == len(self.ARCHIVOS_VIRUS):
+            numericos = self._archivos_numericos(ruta_bases)
+
+            if len(encontrados) == len(self.ARCHIVOS_VIRUS) and (
+                numericos or not self.REQUIERE_ARCHIVO_NUMERICO
+            ):
+                detalle = (
+                    "Se encontró la firma completa Kaspersky/Usb Drive/3.0 "
+                    f"({', '.join(encontrados)}"
+                    + (f" y el fichero numérico {', '.join(numericos)}" if numericos else "")
+                    + ")."
+                )
                 return DeteccionInfeccion(
-                    str(raiz), EstadoDeteccion.CONFIRMADA, encontrados,
-                    "Se encontró la firma completa Kaspersky/Usb Drive/3.0.",
+                    str(raiz), EstadoDeteccion.CONFIRMADA, encontrados, detalle, numericos
+                )
+
+            if len(encontrados) == len(self.ARCHIVOS_VIRUS) and not numericos:
+                return DeteccionInfeccion(
+                    str(raiz), EstadoDeteccion.SOSPECHOSA, encontrados,
+                    "Están los archivos 5.dat a 7.dat, pero falta el fichero numérico "
+                    "sin extensión que completa la firma; se conserva para revisión.",
+                    numericos,
                 )
             return DeteccionInfeccion(
                 str(raiz), EstadoDeteccion.SOSPECHOSA, encontrados,
-                "La estructura coincide parcialmente, pero no contiene los cinco archivos de firma.",
+                "La estructura coincide parcialmente, pero no contiene los archivos "
+                "5.dat, 6.dat y 7.dat junto con el fichero numérico sin extensión.",
+                numericos,
             )
         except OSError as exc:
             return DeteccionInfeccion(
@@ -197,7 +286,7 @@ class MotorReparacionUSB:
         callback_progreso: Optional[Callable[[int, str], None]] = None,
     ) -> ResultadoReparacion:
         """Repara una letra de unidad después de validar la firma completa."""
-        unidad = letra_unidad.rstrip("\\").rstrip(":") + ":"
+        unidad = normalizar_identificador_unidad(letra_unidad)
         return self.reparar_ruta(self._ruta_desde_unidad(unidad), callback_progreso, unidad)
 
     def reparar_ruta(
@@ -244,12 +333,12 @@ class MotorReparacionUSB:
             if self._fue_cancelada(resultado):
                 return resultado
 
-            progreso(40, "Restaurando archivos originales a la raíz…")
+            progreso(40, "Restaurando archivos con copia verificada por SHA-256…")
             self._mover_contenido_a_raiz(ruta_usb_drive, raiz, resultado)
             if self._fue_cancelada(resultado):
                 return resultado
 
-            progreso(70, "Eliminando únicamente los archivos de firma…")
+            progreso(70, "Eliminando únicamente los ficheros de firma (5.dat-7.dat y numéricos)…")
             self._eliminar_archivos_virus(ruta_bases, resultado)
             if self._fue_cancelada(resultado):
                 return resultado
@@ -267,7 +356,8 @@ class MotorReparacionUSB:
                     "REPARACION_EXITOSA",
                     f"Archivos movidos: {resultado.archivos_movidos}; "
                     f"carpetas movidas: {resultado.carpetas_movidas}; "
-                    f"archivos eliminados: {len(resultado.archivos_eliminados)}",
+                    f"archivos eliminados: {len(resultado.archivos_eliminados)}; "
+                    f"copias verificadas por SHA-256: {len(resultado.sumas_sha256)}",
                 )
             else:
                 # No se fuerza el borrado de restos desconocidos. El resultado
@@ -288,7 +378,25 @@ class MotorReparacionUSB:
 
     @staticmethod
     def _ruta_desde_unidad(letra_unidad: str) -> str:
-        return letra_unidad.rstrip("\\").rstrip(":") + ":\\"
+        """Convierte un identificador de unidad en una ruta raíz.
+
+        En Windows recibe una letra (``"E"``, ``"E:"`` o ````E:\\````) y devuelve
+        ````E:\\````. En macOS y Linux el identificador ya es un punto de montaje
+        (``/Volumes/USB``, ``/media/usuario/USB``) y se devuelve tal cual; aplicar
+        el recorte de letras a una ruta POSIX la corrompería.
+        """
+        texto = (letra_unidad or "").strip()
+        if not texto:
+            return texto
+        if ES_WINDOWS:
+            if _PATRON_LETRA_WINDOWS.fullmatch(texto.rstrip("\\")):
+                # Las letras de unidad se canonicalizan en mayúsculas para que el
+                # identificador coincida con el del estado de unidades reparadas.
+                # Una ruta completa no se toca: solo se aplica a "E", "E:" o "E:\".
+                return texto.rstrip("\\").rstrip(":").upper() + ":\\"
+            return texto
+        # macOS/Linux: punto de montaje; no se recorta como si fuera una letra.
+        return texto.replace("\\", "/")
 
     def _fue_cancelada(self, resultado: ResultadoReparacion) -> bool:
         if not self._cancelar:
@@ -356,18 +464,184 @@ class MotorReparacionUSB:
             except OSError as exc:
                 resultado.agregar_error(f"Error moviendo {ruta_origen.name}: {exc}")
 
+    # ------------------------------------------------------------------
+    # Restauración verificada por SHA-256
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sha256(ruta: Path) -> Optional[str]:
+        """Calcula el SHA-256 de un archivo leyéndolo por bloques."""
+        resumen = hashlib.sha256()
+        try:
+            with open(ruta, "rb") as archivo:
+                for bloque in iter(lambda: archivo.read(TAMANO_BLOQUE_HASH), b""):
+                    resumen.update(bloque)
+        except OSError as exc:
+            logger.debug(f"No se pudo calcular SHA-256 de {ruta}: {exc}")
+            return None
+        return resumen.hexdigest()
+
+    @staticmethod
+    def _sincronizar_a_disco(ruta: Path) -> None:
+        """Fuerza la escritura física antes de verificar y retirar el origen.
+
+        Sin ``fsync`` el sistema puede informar una copia completa que aún vive en
+        caché; si entonces se borra el origen, un corte de energía perdería ambos.
+        """
+        try:
+            descriptor = os.open(str(ruta), os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            # No es fatal: en algunos sistemas de ficheros fsync no aplica.
+            logger.debug(f"fsync omitido en {ruta}: {exc}")
+
+    def _copiar_archivo_verificado(
+        self, origen: Path, destino: Path, resultado: ResultadoReparacion
+    ) -> bool:
+        """Copia ``origen`` en ``destino`` y valida la copia con SHA-256.
+
+        Devuelve ``True`` solo cuando ambas sumas coinciden. Si difieren, la copia
+        defectuosa se elimina y el origen queda intacto: nunca se retira un
+        archivo cuya restauración no esté confirmada.
+        """
+        suma_origen = self._sha256(origen)
+        if suma_origen is None:
+            resultado.agregar_error(
+                f"No se pudo leer {origen.name} para calcular su SHA-256; se conservó el origen."
+            )
+            return False
+
+        try:
+            shutil.copy2(str(origen), str(destino))
+        except OSError as exc:
+            resultado.agregar_error(f"Error copiando {origen.name}: {exc}")
+            return False
+
+        self._sincronizar_a_disco(destino)
+        suma_destino = self._sha256(destino)
+
+        if suma_destino is None or suma_destino != suma_origen:
+            try:
+                destino.unlink()
+            except OSError:
+                pass
+            resultado.agregar_error(
+                f"Verificación SHA-256 fallida en {destino.name} "
+                f"(origen {suma_origen[:12]}…, copia {str(suma_destino)[:12]}…); "
+                "se descartó la copia y se conservó el archivo original."
+            )
+            return False
+
+        resultado.agregar_verificado(str(origen), str(destino), suma_origen)
+        return True
+
+    def _copiar_arbol_verificado(
+        self, origen: Path, destino: Path, resultado: ResultadoReparacion
+    ) -> Optional[List[Path]]:
+        """Copia una carpeta completa verificando cada archivo con SHA-256.
+
+        No sigue enlaces simbólicos ni usa ``shutil.move``. Devuelve la lista de
+        orígenes cuya copia quedó verificada, o ``None`` si la restauración
+        falló; solo los orígenes devueltos pueden retirarse después.
+        """
+        verificados: List[Path] = []
+        try:
+            for ruta_origen in sorted(origen.rglob("*"), key=lambda p: len(p.parts)):
+                if self._cancelar:
+                    return None
+                relativa = ruta_origen.relative_to(origen)
+                ruta_destino = destino / relativa
+
+                if ruta_origen.is_symlink():
+                    resultado.agregar_error(
+                        f"Enlace simbólico omitido por seguridad: {ruta_origen}"
+                    )
+                    continue
+                if ruta_origen.is_dir():
+                    ruta_destino.mkdir(parents=True, exist_ok=True)
+                    try:
+                        shutil.copystat(str(ruta_origen), str(ruta_destino))
+                    except OSError:
+                        pass
+                    continue
+                if not ruta_origen.is_file():
+                    resultado.agregar_error(
+                        f"Elemento no soportado; se conserva el origen: {ruta_origen}"
+                    )
+                    continue
+
+                ruta_destino.parent.mkdir(parents=True, exist_ok=True)
+                if not self._copiar_archivo_verificado(ruta_origen, ruta_destino, resultado):
+                    return None
+                verificados.append(ruta_origen)
+        except OSError as exc:
+            resultado.agregar_error(f"Error copiando la carpeta {origen.name}: {exc}")
+            return None
+
+        return verificados
+
+    def _retirar_origen_verificado(
+        self, origen: Path, verificados: List[Path], resultado: ResultadoReparacion
+    ) -> None:
+        """Elimina únicamente los orígenes cuya copia fue verificada.
+
+        Se recorre de abajo hacia arriba y solo se usa ``rmdir`` sobre carpetas
+        vacías: cualquier elemento no verificado (enlaces, ficheros especiales o
+        contenido desconocido) permanece en su lugar para revisión manual.
+        """
+        permitidos = {str(p) for p in verificados}
+        for ruta in verificados:
+            try:
+                ruta.unlink()
+            except OSError as exc:
+                resultado.agregar_error(
+                    f"La copia está verificada, pero no se pudo retirar el origen {ruta.name}: {exc}"
+                )
+        for raiz, directorios, archivos in os.walk(origen, topdown=False, followlinks=False):
+            for nombre in archivos:
+                ruta = Path(raiz) / nombre
+                if str(ruta) in permitidos:
+                    continue
+                logger.debug(f"Se conserva elemento no verificado: {ruta}")
+            for nombre in directorios:
+                self._eliminar_directorio_si_vacio(Path(raiz) / nombre, resultado, nombre)
+        self._eliminar_directorio_si_vacio(origen, resultado, origen.name)
+
     def _mover_archivo(self, origen: Path, destino: Path, resultado: ResultadoReparacion) -> None:
+        """Restaura un archivo copiándolo, verificando SHA-256 y retirando el origen."""
         destino_final = self._ruta_sin_colision(destino)
         if destino_final != destino:
             resultado.agregar_error(
                 f"Colisión resuelta: {origen.name} -> {destino_final.name}"
             )
-        shutil.move(str(origen), str(destino_final))
+        if not self._copiar_archivo_verificado(origen, destino_final, resultado):
+            # El origen se conserva: sin copia verificada no se borra nada.
+            return
+        try:
+            origen.unlink()
+        except OSError as exc:
+            resultado.agregar_error(
+                f"Copia verificada en {destino_final.name}, pero no se pudo retirar "
+                f"el origen {origen.name}: {exc}"
+            )
+            return
         resultado.agregar_movido(str(origen), str(destino_final), es_carpeta=False)
 
     def _mover_carpeta(self, origen: Path, destino: Path, resultado: ResultadoReparacion) -> None:
+        """Restaura una carpeta completa con verificación previa de cada archivo."""
         if not destino.exists():
-            shutil.move(str(origen), str(destino))
+            try:
+                destino.mkdir(parents=True)
+            except OSError as exc:
+                resultado.agregar_error(f"No se pudo crear el destino {destino.name}: {exc}")
+                return
+            verificados = self._copiar_arbol_verificado(origen, destino, resultado)
+            if verificados is None:
+                # Sin verificación completa no se retira nada del origen.
+                return
+            self._retirar_origen_verificado(origen, verificados, resultado)
             resultado.agregar_movido(str(origen), str(destino), es_carpeta=True)
             return
         self._fusionar_carpetas(origen, destino, resultado)
@@ -385,8 +659,7 @@ class MotorReparacionUSB:
                     if ruta_destino.exists():
                         self._fusionar_carpetas(ruta_origen, ruta_destino, resultado)
                     else:
-                        shutil.move(str(ruta_origen), str(ruta_destino))
-                        resultado.agregar_movido(str(ruta_origen), str(ruta_destino), es_carpeta=True)
+                        self._mover_carpeta(ruta_origen, ruta_destino, resultado)
                 else:
                     self._mover_archivo(ruta_origen, ruta_destino, resultado)
             except OSError as exc:
@@ -405,11 +678,19 @@ class MotorReparacionUSB:
             contador += 1
 
     def _eliminar_archivos_virus(self, ruta_bases: Path, resultado: ResultadoReparacion) -> None:
-        for nombre in self.ARCHIVOS_VIRUS:
+        """Elimina solo los ficheros que forman la firma confirmada.
+
+        Se retiran ``5.dat``, ``6.dat``, ``7.dat`` y los ficheros numéricos sin
+        extensión detectados durante el análisis. Cualquier otro archivo de la
+        carpeta ``3.0`` se conserva para revisión manual.
+        """
+        nombres_firma = list(self.ARCHIVOS_VIRUS)
+        nombres_firma.extend(self._archivos_numericos(ruta_bases))
+        for nombre in nombres_firma:
             if self._cancelar:
                 return
             ruta = ruta_bases / nombre
-            if not ruta.exists():
+            if not ruta.is_file() or ruta.is_symlink():
                 continue
             try:
                 self._quitar_atributos_archivo(ruta, resultado)

@@ -1,0 +1,6 @@
+# Dependencias de desarrollo y empaquetado.
+# Instalación: python -m pip install -r requirements-dev.txt
+-r requirements.txt
+
+# PyInstaller genera el ejecutable en Windows, macOS y Linux.
+pyinstaller>=6.0.0
