@@ -30,8 +30,17 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from compat import (
+    FAMILIA_AIX,
+    FAMILIA_BSD,
+    FAMILIA_DESCONOCIDA,
+    FAMILIA_LINUX,
+    FAMILIA_MACOS,
+    FAMILIA_SOLARIS,
+    obtener_familia_posix,
+)
 from logger import obtener_logger
 
 logger = obtener_logger()
@@ -456,6 +465,210 @@ def _obtener_unidades_linux() -> List[UnidadExtraible]:
 
 
 # ---------------------------------------------------------------------------
+# Backend POSIX genérico (BSD, Solaris/illumos, AIX y Unix no reconocidos)
+# ---------------------------------------------------------------------------
+# Estos sistemas no tienen ni /proc/mounts ni /sys/block, así que se enumeran los
+# montajes con `df -kP`, cuyo formato POSIX está disponible en todos ellos.
+_COMANDO_DF = ("df", "-kP")
+_TIMEOUT_COMANDO = 8
+
+# Patrones de dispositivo que en cada familia BSD/Unix suelen ser medios
+# extraíbles conectados por USB. Son heurísticas: ante la duda la unidad se
+# marca como no reparable y solo se diagnostica.
+_DISPOSITIVOS_EXTRAIBLES_BSD = {
+    "freebsd": ("da",),          # da* = acceso directo SCSI/USB; ada* = SATA interno
+    "dragonfly": ("da",),
+    "midnightbsd": ("da",),
+    "openbsd": ("sd",),          # sd* = SCSI/USB; wd* = ATA interno
+    "netbsd": ("sd", "ld",),
+}
+_DISPOSITIVOS_OPTICOS = ("cd", "acd", "mcd", "rscsi")
+
+# Puntos de montaje típicos de medios extraíbles en sistemas Unix.
+_RUTAS_EXTRAIBLES = ("/media/", "/mnt/", "/run/media/", "/var/run/media/", "/Volumes/")
+
+# Sistemas de ficheros propios de memorias USB y medios ópticos.
+_FS_MEDIO_EXTRAIBLE = {
+    "msdosfs", "vfat", "fat", "fat32", "exfat", "ntfs", "fuseblk",
+    "iso9660", "udf", "cd9660", "hfs", "hfsplus", "apfs",
+}
+
+# Montajes del sistema que nunca son una unidad del usuario.
+_MONTAJES_SISTEMA = {
+    "/", "/boot", "/usr", "/var", "/etc", "/dev", "/proc", "/sys", "/tmp", "/home",
+    "/root", "/opt", "/sbin", "/bin", "/lib", "/libexec", "/usr/local", "/private",
+    "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/proc/fs", "/system",
+    "/Library", "/Applications", "/cores", "/var/run", "/run",
+}
+
+# Dispositivos que no representan un medio físico del usuario.
+_DISPOSITIVOS_IGNORADOS = (
+    "tmpfs", "devfs", "devtmpfs", "proc", "sysfs", "none", "swap", "map ",
+    "/dev/loop", "/dev/md", "/dev/dm-", "/dev/zvol", "fdescfs", "linprocfs",
+    "linsysfs", "cgroup", "mqueue", "shmfs", "objfs", "autofs", "-hosts",
+)
+
+_PATRON_MOUNT_BSD = re.compile(r"^(?P<dev>\S+)\s+on\s+(?P<mnt>.+?)\s+\((?P<fs>[^,)]+)")
+_PATRON_MOUNT_LINUX = re.compile(r"^(?P<dev>\S+)\s+on\s+(?P<mnt>.+?)\s+type\s+(?P<fs>\S+)")
+
+
+def _salida_comando(comando: tuple) -> str:
+    """Ejecuta un comando y devuelve su stdout, o cadena vacía si falla."""
+    try:
+        salida = subprocess.run(
+            comando, capture_output=True, text=True,
+            timeout=_TIMEOUT_COMANDO, check=False,
+        )
+        return salida.stdout if salida.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.debug(f"Comando {comando[0]} no disponible: {e}")
+        return ""
+
+
+def _parsear_df() -> List[Tuple[str, str, int, int]]:
+    """Interpreta ``df -kP`` y devuelve (dispositivo, montaje, total, libre).
+
+    El formato POSIX garantiza una línea por sistema de ficheros con seis
+    columnas; el punto de montaje es la última y puede contener espacios, por eso
+    se divide con un máximo de cinco separaciones.
+    """
+    texto = _salida_comando(_COMANDO_DF)
+    if not texto:
+        return []
+    resultados = []
+    for linea in texto.splitlines()[1:]:  # la primera línea es la cabecera
+        campos = linea.split(None, 5)
+        if len(campos) < 6:
+            continue
+        dispositivo, bloques, _usado, disponible, _capacidad, montaje = campos
+        try:
+            total = int(bloques) * 1024
+            libre = int(disponible) * 1024
+        except ValueError:
+            continue
+        resultados.append((dispositivo, montaje, total, libre))
+    return resultados
+
+
+def _tipos_de_montaje() -> Dict[str, str]:
+    """Mapa punto de montaje -> sistema de ficheros, a partir de ``mount``.
+
+    Cubre las tres sintaxis habituales: Linux (``... type vfat (...)``),
+    BSD/AIX (``... (msdosfs, local, ...)``) y cualquier otra, donde el tipo
+    queda sin determinar.
+    """
+    texto = _salida_comando(("mount",))
+    tipos: Dict[str, str] = {}
+    if not texto:
+        return tipos
+    for linea in texto.splitlines():
+        coincidencia = _PATRON_MOUNT_LINUX.match(linea) or _PATRON_MOUNT_BSD.match(linea)
+        if coincidencia:
+            tipos[coincidencia.group("mnt")] = coincidencia.group("fs").strip().lower()
+    return tipos
+
+
+def _nombre_dispositivo_base(dispositivo: str) -> str:
+    """Extrae el prefijo alfabético del dispositivo: ``/dev/da0s1`` -> ``da``."""
+    nombre = Path(dispositivo).name
+    coincidencia = re.match(r"([a-zA-Z]+)", nombre)
+    return coincidencia.group(1).lower() if coincidencia else ""
+
+
+def _clasificar_extraible_posix(dispositivo: str, montaje: str, fs: str) -> Tuple[int, bool]:
+    """Devuelve (tipo_drive, es_usb_fisico) de forma conservadora.
+
+    Solo marca una unidad como USB físico cuando el prefijo del dispositivo es
+    característico de medios extraíbles en esa familia, o cuando el punto de
+    montaje es típico de medios removibles y el sistema de ficheros también lo es.
+    """
+    sistema = (platform.system() or "").lower()
+    prefijo = _nombre_dispositivo_base(dispositivo)
+
+    if prefijo in _DISPOSITIVOS_OPTICOS:
+        return DRIVE_CDROM, False
+
+    patrones_extraibles = _DISPOSITIVOS_EXTRAIBLES_BSD.get(sistema, ())
+    por_dispositivo = bool(prefijo) and prefijo in patrones_extraibles
+
+    por_montaje = any(montaje.startswith(ruta) for ruta in _RUTAS_EXTRAIBLES)
+    por_sistema_archivos = fs in _FS_MEDIO_EXTRAIBLE
+
+    if por_dispositivo:
+        return DRIVE_REMOVABLE, True
+    if por_montaje and por_sistema_archivos:
+        return DRIVE_REMOVABLE, True
+    if por_montaje:
+        # Ruta típica de medio extraíble pero sistema de ficheros indeterminado:
+        # se diagnostica sin habilitar la reparación.
+        return DRIVE_FIXED, False
+    return DRIVE_FIXED, False
+
+
+def _obtener_unidades_posix_generico() -> List[UnidadExtraible]:
+    """Enumera montajes en BSD, Solaris, AIX y Unix no reconocidos."""
+    entradas = _parsear_df()
+    if not entradas:
+        logger.debug("POSIX genérico: `df -kP` no devolvió montajes")
+        return []
+
+    tipos = _tipos_de_montaje()
+    unidades: List[UnidadExtraible] = []
+    vistos: Set[str] = set()
+
+    for dispositivo, montaje, total, libre in entradas:
+        if montaje in vistos:
+            continue
+        if montaje in _MONTAJES_SISTEMA:
+            continue
+        if any(dispositivo.startswith(ignorado) for ignorado in _DISPOSITIVOS_IGNORADOS):
+            continue
+        if dispositivo in _FS_VIRTUALES:
+            continue
+
+        fs = tipos.get(montaje, "")
+        if fs in _FS_VIRTUALES:
+            continue
+        if fs in _FS_RED:
+            vistos.add(montaje)
+            unidades.append(UnidadExtraible(
+                letra=montaje, ruta_raiz=montaje,
+                etiqueta=Path(montaje).name or montaje,
+                sistema_archivos=fs, tipo_drive=DRIVE_REMOTE, es_usb_fisico=False,
+            ))
+            continue
+
+        vistos.add(montaje)
+        tipo, es_usb = _clasificar_extraible_posix(dispositivo, montaje, fs)
+        unidades.append(UnidadExtraible(
+            letra=montaje, ruta_raiz=montaje,
+            etiqueta=_etiqueta_posix(montaje),
+            sistema_archivos=fs,
+            tamano_total=total, espacio_libre=libre,
+            numero_serie=_serie_posix(dispositivo),
+            tipo_drive=tipo, es_usb_fisico=es_usb,
+        ))
+
+    logger.debug(f"POSIX genérico ({NOMBRE_PLATAFORMA}): {len(unidades)} montajes enumerados")
+    return unidades
+
+
+def _etiqueta_posix(montaje: str) -> str:
+    """Etiqueta del volumen; en Unix genérico se usa el nombre del montaje."""
+    try:
+        ruta = Path(montaje)
+        etiqueta = ruta.name
+        return etiqueta or montaje
+    except Exception:
+        return montaje
+
+
+def _serie_posix(dispositivo: str) -> str:
+    """Identificador estable del dispositivo, si el sistema lo expone."""
+    return Path(dispositivo).name if dispositivo.startswith("/dev/") else ""
+
+
+# ---------------------------------------------------------------------------
 # Despacho multiplataforma
 # ---------------------------------------------------------------------------
 def obtener_unidades_extraibles() -> List[UnidadExtraible]:
@@ -469,10 +682,18 @@ def obtener_unidades_extraibles() -> List[UnidadExtraible]:
     try:
         if ES_WINDOWS:
             return _windows().obtener_unidades_extraibles()
-        if ES_MACOS:
+
+        familia = obtener_familia_posix()
+        if familia == FAMILIA_MACOS:
             return _obtener_unidades_macos()
-        if ES_LINUX:
-            return _obtener_unidades_linux()
+        if familia == FAMILIA_LINUX:
+            # /proc/mounts es el origen más preciso; si el kernel no lo expone
+            # (contenedores restringidos) se degrada al backend genérico.
+            unidades = _obtener_unidades_linux()
+            return unidades or _obtener_unidades_posix_generico()
+        if familia in (FAMILIA_BSD, FAMILIA_SOLARIS, FAMILIA_AIX, FAMILIA_DESCONOCIDA):
+            return _obtener_unidades_posix_generico()
+
         logger.warning(f"Plataforma no soportada para enumeración: {platform.system()}")
         return []
     except Exception as e:

@@ -13,15 +13,30 @@ concurrency:
 
 jobs:
   pruebas:
-    name: Pruebas en ${{ matrix.os }}
+    name: ${{ matrix.os }} · Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
     strategy:
-      # Sin fail-fast: los tres sistemas deben reportar su resultado, aunque uno
+      # Sin fail-fast: cada combinación debe reportar su resultado, aunque otra
       # falle, para saber exactamente dónde se rompe la compatibilidad.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ['3.12']
+        include:
+          # Sistemas modernos con el Python actual del proyecto.
+          - os: ubuntu-latest
+            python-version: '3.12'
+          - os: macos-latest
+            python-version: '3.12'
+          - os: windows-latest
+            python-version: '3.12'
+
+          # Piso de compatibilidad. Python 3.8 es el último intérprete con
+          # instalador para Windows Vista, 7 y 8.0; desde 3.9 el ejecutable ni
+          # siquiera arranca en esos sistemas. Se prueba también en Linux porque
+          # ahí sí hay binarios de 3.8 y permite correr la suite completa.
+          - os: windows-latest
+            python-version: '3.8'
+          - os: ubuntu-22.04
+            python-version: '3.8'
 
     steps:
       - name: Obtener código
@@ -38,17 +53,66 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # Ubuntu no trae pantalla, y las pruebas de la interfaz construyen una
+      # ventana de verdad. Xvfb la simula para que no se omitan en silencio.
+      - name: Preparar pantalla virtual
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v xvfb-run > /dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y xvfb
+          fi
+          xvfb-run --help > /dev/null && echo "Xvfb disponible"
+
       - name: Mostrar plataforma detectada
-        run: python -c "import usb_monitor; print('Plataforma:', usb_monitor.NOMBRE_PLATAFORMA, '| Windows:', usb_monitor.ES_WINDOWS, '| macOS:', usb_monitor.ES_MACOS, '| Linux:', usb_monitor.ES_LINUX)"
+        run: |
+          python -c "import compat; i = compat.obtener_info_plataforma(); print(f'{i.nombre_amigable} | familia={i.familia} | {i.arquitectura}/{i.bits_proceso} bits | Python {i.python_version} | soporte={i.nivel_soporte}')"
+
+      - name: Mostrar Python máximo por versión de Windows
+        run: |
+          python -c "import compat; [print(f'  Windows {v[0]}.{v[1]} -> Python {p[0]}.{p[1]}') for v, p in sorted(compat.MAXIMO_PYTHON_POR_WINDOWS.items())]"
 
       # py_compile solo valida sintaxis y no importa los módulos, por eso
       # usb_monitor_windows.py (que requiere pywin32) puede compilarse también
       # en Ubuntu y macOS.
       - name: Comprobar sintaxis
-        run: python -m py_compile main.py gui.py logger.py process_manager.py repair_engine.py scraper.py usb_monitor.py usb_monitor_windows.py
+        run: python -m py_compile main.py gui.py logger.py process_manager.py repair_engine.py scraper.py usb_monitor.py usb_monitor_windows.py compat.py temas.py ayuda.py
+
+      # El piso de Python 3.8 no se puede dejar a la intuición: si alguien usa
+      # match/case, uniones PEP 604 o dict[str, str] en tiempo de ejecución, el
+      # ejecutable dejaría de arrancar en Windows 7 y aquí se detecta antes.
+      - name: Verificar compatibilidad con Python 3.8
+        run: python -m unittest discover -s tests -p "test_piso_python38.py" -v
 
       - name: Ejecutar pruebas unitarias
+        if: runner.os != 'Linux'
         run: python -m unittest discover -s tests -v
+
+      - name: Ejecutar pruebas unitarias (bajo Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python -m unittest discover -s tests -v
+
+      # Las pruebas de la interfaz se omiten solas cuando no hay pantalla. En
+      # Linux controlamos la pantalla, así que una omisión aquí significa que
+      # algo se rompió y debe fallar la compilación en vez de pasar de puntillas.
+      - name: Exigir que la prueba gráfica se ejecute
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -o pipefail
+          salida=$(xvfb-run -a python -m unittest discover -s tests -p "test_gui_headless.py" 2>&1)
+          echo "$salida"
+          if echo "$salida" | grep -qi "skipped"; then
+            echo "::error::Las pruebas de la interfaz se omitieron aun con Xvfb activo."
+            exit 1
+          fi
+          if ! echo "$salida" | grep -qE "^OK"; then
+            echo "::error::Las pruebas de la interfaz no pasaron."
+            exit 1
+          fi
 
       - name: Verificar rutas únicas sin duplicados
         run: python -c "import scraper; r=scraper.obtener_rutas_por_defecto(); assert len(r)==52, len(r); assert len({x.lower() for x in r})==52; print('52 rutas únicas confirmadas')"
+
+      - name: Verificar contraste WCAG de todas las paletas
+        run: python -c "import temas,sys; hallados=[(n, temas.validar_paleta(temas.construir_paleta(n))) for n in temas.PALETAS]; [print(' ', n, '->', pr or 'sin problemas') for n, pr in hallados]; sys.exit(1 if any(pr for _, pr in hallados) else 0)"
