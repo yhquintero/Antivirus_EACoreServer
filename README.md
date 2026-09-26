@@ -27,7 +27,7 @@ Aplicación de escritorio en Python 3.12+ para **diagnosticar** la estructura US
 - **Consulta HTTPS de rutas**: obtiene rutas históricas candidatas de `EACoreServer.exe` desde `https://processchecker.com/file/EACoreServer.exe.html` y las combina con una lista local para funcionar sin conexión. Las rutas son datos de diagnóstico, **no indicadores de malware**.
 - **Gestión protegida de procesos**: muestra procesos `EACoreServer.exe` y permite finalizarlos con confirmación. Las rutas típicas de EA/Origin y sus juegos se identifican como posibles componentes legítimos y quedan protegidas contra eliminación por nombre.
 - **Monitoreo de unidades**: lista letras de unidad para diagnóstico. Solo memorias extraíbles y discos USB físicos se habilitan para reparación; discos internos y de red son de solo diagnóstico.
-- **Reparación conservadora y manual**: solo repara después de encontrar la firma completa `Kaspersky\Usb Drive\3.0` con `5.dat` al `7.dat`, y tras una confirmación explícita. Restaura archivos, resuelve colisiones sin sobrescribir y elimina únicamente esos archivos de firma y carpetas vacías. No existe reparación automática al insertar una unidad.
+- **Reparación conservadora y manual**: solo repara después de encontrar la firma exacta `Kaspersky\Usb Drive\3.0` con `5.dat`, `6.dat`, `7.dat` y un fichero numérico sin extensión, y tras una confirmación explícita. Restaura archivos por copia verificada con SHA-256 antes de retirar el origen, resuelve colisiones sin sobrescribir y elimina únicamente esos ficheros de firma y carpetas vacías. No existe reparación automática al insertar una unidad.
 - **Temas de interfaz**: selector **Claro / Oscuro / Sistema** (menú *Ver → Tema*). La preferencia se guarda en `%USERPROFILE%\Antivirus_EACoreServer_Logs\config.json`.
 
 ## Principios de seguridad
@@ -40,10 +40,20 @@ Aplicación de escritorio en Python 3.12+ para **diagnosticar** la estructura US
 
 ## Requisitos del Sistema
 
-- **SO**: Windows 10/11 (64-bit recomendado)
+- **SO**: Windows 10/11 (64-bit recomendado), macOS 12+ y Linux con `tkinter`
 - **Python**: 3.12 o superior
-- **Permisos**: Se recomienda ejecutar como Administrador para funcionalidad completa
-- **Arquitectura**: x64
+- **Permisos**: se recomienda Administrador en Windows, `root` en Linux y privilegios
+  de administrador en macOS para la funcionalidad completa
+- **Arquitectura**: x64 en Windows; x64 y arm64 en macOS y Linux
+
+> **Compatibilidad multiplataforma.** El código Win32 (`pywin32`, `ctypes.windll`,
+> IOCTLs y la ventana `WM_DEVICECHANGE`) está aislado en `usb_monitor_windows.py` y
+> solo se importa en Windows. `usb_monitor.py` es una fachada portable que en macOS
+> usa `diskutil` y en Linux `/proc/mounts` + `/sys/block`. La elevación de privilegios
+> usa `ShellExecuteW` en Windows, `osascript` en macOS y `pkexec`/`sudo` en Linux.
+>
+> La **reparación real** sigue dirigida a unidades con la estructura del malware; en
+> macOS y Linux la herramienta opera en modo de diagnóstico y prueba.
 
 ---
 
@@ -97,8 +107,10 @@ runas /user:Administrador python main.py
 ### Paso 1: Instalar PyInstaller
 
 ```powershell
-pip install pyinstaller>=6.0.0
+pip install -r requirements-dev.txt
 ```
+
+> `requirements-dev.txt` incluye `requirements.txt` y añade PyInstaller.
 
 ### Paso 2: Empaquetar (con consola visible para depuración)
 
@@ -214,12 +226,16 @@ El instalador estará en la carpeta `dist`.
 | `gui.py` | Interfaz gráfica completa con tkinter (3 pestañas) |
 | `scraper.py` | Consulta HTTPS y validación de rutas candidatas de processchecker.com |
 | `process_manager.py` | Diagnóstico de procesos y protección de rutas típicas EA/Origin |
-| `usb_monitor.py` | Monitor de inserción/remoción de unidades USB |
-| `repair_engine.py` | Detección por firma completa y reparación no destructiva de USB |
+| `usb_monitor.py` | Fachada multiplataforma del monitor USB (Windows, macOS y Linux) |
+| `usb_monitor_windows.py` | Backend exclusivo de Windows: `pywin32`, IOCTLs y `WM_DEVICECHANGE` |
+| `repair_engine.py` | Detección por firma exacta y restauración verificada con SHA-256 |
 | `logger.py` | Sistema de logging centralizado (consola + archivo) |
-| `requirements.txt` | Dependencias Python |
+| `requirements.txt` | Dependencias Python (`pywin32` marcado solo para Windows) |
+| `requirements-dev.txt` | Dependencias de empaquetado (PyInstaller) |
 | `Antivirus_EACoreServer.spec` | Configuración de PyInstaller |
-| `tests/test_repair_engine.py` | Pruebas de firma, colisiones y preservación de contenido |
+| `tests/test_repair_engine.py` | Pruebas de firma exacta, SHA-256, colisiones y preservación |
+| `tests/test_scraper_rutas.py` | Pruebas de las 52 rutas únicas sin duplicados |
+| `tests/test_multiplataforma.py` | Pruebas de importación y comportamiento en los 3 SO |
 
 ---
 
@@ -240,16 +256,39 @@ La reparación se habilita únicamente cuando se encuentra la siguiente firma co
             
 ```
 
-Una carpeta con el mismo nombre pero sin los cinco archivos de firma queda marcada como **requiere revisión** y no se modifica.
+La firma **exacta** exige los cuatro elementos a la vez:
+
+| Elemento | Ubicación | Obligatorio |
+|----------|-----------|-------------|
+| `5.dat`, `6.dat`, `7.dat` | `Kaspersky\Usb Drive\3.0\` | Sí, los tres |
+| Fichero numérico **sin extensión** (p. ej. `0`, `1337`, `20240517`) | `Kaspersky\Usb Drive\3.0\` | Al menos uno |
+
+Una carpeta con el mismo nombre pero sin la firma completa queda marcada como
+**requiere revisión** y no se modifica. Si están los tres `.dat` pero falta el
+fichero numérico, el diagnóstico es **sospechoso**: los `.dat` sueltos no son
+prueba suficiente. Un *directorio* llamado `1234` tampoco cuenta como firma,
+solo archivos regulares cuyo nombre sea íntegramente numérico.
 
 ### Proceso de reparación seguro
 
-1. Valida la firma completa y solicita confirmación del usuario.
-2. Quita atributos de oculto/sistema/solo lectura en la estructura validada.
-3. Mueve el contenido de `Usb Drive\` a la raíz sin sobrescribir: ante colisiones crea un nombre con sufijo (`_1`, `_2`, …).
-4. Elimina solo `5.dat` al `7.dat` dentro de `3.0\`.
-5. Elimina `3.0\`, `Usb Drive\` y `Kaspersky\` **solo si están vacías**. Si queda un elemento desconocido o bloqueado, lo conserva y registra el incidente.
-6. Guarda el estado de unidades completadas y todas las acciones en el log.
+1. Valida la firma exacta y solicita confirmación del usuario.
+2. Quita atributos de oculto/sistema/solo lectura en la estructura validada
+   (ACL de Win32 en Windows; permisos POSIX en macOS y Linux).
+3. **Restaura por copia verificada, nunca con `shutil.move` a ciegas.** Cada
+   archivo se calcula su SHA-256 en el origen, se copia al destino, se fuerza la
+   escritura a disco con `fsync` y se vuelve a calcular el SHA-256 de la copia.
+   **Solo si ambas sumas coinciden se retira el origen**; si difieren, la copia
+   defectuosa se descarta y el archivo original permanece intacto.
+4. Resuelve colisiones sin sobrescribir: crea un nombre con sufijo (`_1`, `_2`, …).
+5. Elimina únicamente `5.dat`, `6.dat`, `7.dat` y los ficheros numéricos sin
+   extensión dentro de `3.0\`.
+6. Elimina `3.0\`, `Usb Drive\` y `Kaspersky\` **solo si están vacías**, usando
+   `rmdir` y nunca `rmtree`. Si queda un elemento desconocido o bloqueado, lo
+   conserva y registra el incidente.
+7. No sigue enlaces simbólicos: un `symlink` dentro del USB no puede usarse para
+   escribir fuera de él.
+8. Guarda el estado de unidades completadas, las sumas SHA-256 verificadas y
+   todas las acciones en el log.
 
 
 ---
@@ -280,12 +319,13 @@ La aplicación maneja los siguientes escenarios de error:
 - Verifique si es un servicio de Windows desde `services.msc`
 
 ### La reparación USB falla
-- La unidad debe ser extraíble/USB físico y tener los cinco archivos de firma.
+- La unidad debe ser extraíble/USB físico y tener la firma exacta: `5.dat`, `6.dat`,
+  `7.dat` y al menos un fichero numérico sin extensión dentro de `3.0\`.
 - Asegúrese de que la unidad no está en uso y que tiene permisos de escritura.
 - Si se informa contenido no reconocido, haga una copia y revíselo: la herramienta lo conserva deliberadamente.
 
 ### El scraping no funciona
-- Se usa fallback automático con 57 rutas locales
+- Se usa fallback automático con 52 rutas locales únicas
 - Verifique conectividad a internet
 - La URL `https://processchecker.com/file/EACoreServer.exe.html` puede estar caída
 
@@ -293,13 +333,32 @@ La aplicación maneja los siguientes escenarios de error:
 
 ## Pruebas
 
-Las pruebas del motor no requieren una unidad USB física ni `pywin32`:
+Las pruebas no requieren una unidad USB física ni `pywin32`:
 
-```powershell
+```bash
+python -m py_compile main.py gui.py logger.py process_manager.py repair_engine.py scraper.py usb_monitor.py usb_monitor_windows.py
 python -m unittest discover -s tests -v
 ```
 
-Cubren ausencia de firma, firma incompleta sin modificaciones, restauración con colisiones y preservación de contenido no reconocido.
+**54 pruebas** cubren (el número de omitidas varía según el SO):
+
+- ausencia de firma, firma incompleta y `.dat` completos sin fichero numérico;
+- confirmación de la firma exacta con varios ficheros numéricos sin extensión;
+- restauración con verificación SHA-256 y auditoría de las sumas;
+- copia corrupta: el origen **no** se retira cuando el SHA-256 no coincide;
+- resolución de colisiones y preservación de contenido no reconocido;
+- enlaces simbólicos no seguidos;
+- las 52 rutas únicas sin duplicados y su fusión con las rutas remotas;
+- importación y comportamiento multiplataforma en Windows, macOS y Linux.
+
+`py_compile` solo valida sintaxis y no importa los módulos, por eso
+`usb_monitor_windows.py` puede compilarse también en Ubuntu y macOS.
+
+### Integración continua
+
+El flujo `.github/workflows/ci.yml` ejecuta la comprobación de sintaxis y las
+pruebas unitarias en una matriz de **Ubuntu, macOS y Windows** con Python 3.12,
+sin `fail-fast` para que los tres sistemas reporten su resultado.
 
 ---
 
@@ -332,4 +391,4 @@ Para problemas o preguntas, revise:
 
 *Última actualización: Septiembre 2026*
 *Versión: 1.1.0*
-*Python 3.12+ | Windows 10/11*
+*Python 3.12+ | Windows 10/11 · macOS · Linux*

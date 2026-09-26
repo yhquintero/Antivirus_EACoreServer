@@ -1,10 +1,13 @@
-# Dependencias principales
+# Dependencias principales (Windows, macOS y Linux)
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 psutil>=5.9.0
-pywin32>=306
+
+# Interfaz gráfica: iconos y bandeja del sistema
 pystray>=0.19.0
 Pillow>=10.0.0
 
-# Para desarrollo y empaquetado
-pyinstaller>=6.0.0
+# Exclusivo de Windows. pywin32 no existe en macOS ni Linux, por eso se marca
+# con sys_platform: sin este marcador la instalación fallaría en el CI de Ubuntu
+# y macOS, y el backend Win32 ya se aísla en usb_monitor_windows.py.
+pywin32>=306; sys_platform == "win32"

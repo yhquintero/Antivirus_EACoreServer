@@ -54,7 +54,7 @@ class ScraperEACoreServer:
                 logger.warning("No se encontraron rutas en el scraping, usando rutas por defecto")
                 rutas = self._rutas_por_defecto()
             else:
-                # Fusionar con las 57 rutas por defecto para garantizar cobertura total
+                # Fusionar con las 52 rutas por defecto para garantizar cobertura total
                 rutas = self._fusionar_con_defecto(rutas)
             
             self._rutas_cache = rutas
@@ -131,7 +131,7 @@ class ScraperEACoreServer:
         ))
 
     def _fusionar_con_defecto(self, rutas: List[str]) -> List[str]:
-        """Fusiona las rutas obtenidas de la web con las 57 por defecto,
+        """Fusiona las rutas obtenidas de la web con las 52 por defecto,
         deduplicando (insensible a mayúsculas) y respetando el orden."""
         vistas = set()
         combinadas = []
@@ -144,10 +144,31 @@ class ScraperEACoreServer:
     
     def _rutas_por_defecto(self) -> List[str]:
         """
-        Las 57 rutas exactas de EACoreServer.exe reportadas en
+        Las 52 rutas exactas y únicas de EACoreServer.exe reportadas en
         https://processchecker.com/file/EACoreServer.exe.html
         (orden de la tabla original: Path / Product / Vendor / Version / Size / MD5).
+
+        La lista se deduplica de forma defensiva (insensible a mayúsculas y
+        conservando el orden) para que el número de rutas únicas no pueda
+        derivar si alguien añade una entrada repetida.
         """
+        return self._deduplicar(self._rutas_base())
+
+    @staticmethod
+    def _deduplicar(rutas: List[str]) -> List[str]:
+        """Elimina duplicados insensibles a mayúsculas conservando el orden."""
+        vistas = set()
+        unicas = []
+        for ruta in rutas:
+            clave = ruta.lower()
+            if clave not in vistas:
+                vistas.add(clave)
+                unicas.append(ruta)
+        return unicas
+
+    @staticmethod
+    def _rutas_base() -> List[str]:
+        """Lista literal de rutas históricas, antes de deduplicar."""
         rutas_base = [
             # 1-3: EADM y Crysis 2 en Program Files
             r"C:\Program Files\Electronic Arts\EADM\EACoreServer.exe",
@@ -229,3 +250,16 @@ def obtener_scraper() -> ScraperEACoreServer:
 def obtener_rutas_candidatas(forzar_actualizacion: bool = False) -> List[str]:
     """Función de conveniencia para obtener rutas candidatas."""
     return obtener_scraper().obtener_rutas_candidatas(forzar_actualizacion)
+
+
+def obtener_rutas_por_defecto() -> List[str]:
+    """Devuelve las rutas locales de respaldo, únicas y sin duplicados.
+
+    Es la lista que se usa cuando no hay conexión con processchecker.com.
+    """
+    return obtener_scraper()._rutas_por_defecto()
+
+
+def cantidad_rutas_por_defecto() -> int:
+    """Número de rutas locales únicas de respaldo (52)."""
+    return len(obtener_rutas_por_defecto())

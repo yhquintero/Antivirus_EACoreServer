@@ -1,23 +1,41 @@
 """
 Módulo para detección y finalización de procesos EACoreServer.exe.
-Usa psutil para gestión de procesos y win32api para operaciones de Windows.
+
+Usa ``psutil`` para la gestión de procesos, que es multiplataforma, y las API de
+``pywin32`` solo para las operaciones exclusivas de Windows (servicios,
+propietarios ACL y atributos de archivo). En macOS y Linux esas API no existen:
+los símbolos quedan en ``None`` y cada método degrada de forma controlada en
+lugar de provocar un ``ImportError`` que impediría cargar la aplicación.
 """
 
 import os
 import time
 import psutil
-import win32api
-import win32con
-import win32security
-import win32process
-import win32service
-import win32serviceutil
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from logger import obtener_logger
 
 logger = obtener_logger()
+
+ES_WINDOWS = os.name == "nt"
+
+if ES_WINDOWS:
+    import win32api
+    import win32con
+    import win32security
+    import win32process
+    import win32service
+    import win32serviceutil
+else:
+    # En macOS/Linux no hay servicios Win32 ni ACL; el módulo sigue siendo
+    # importable para diagnóstico y pruebas.
+    win32api = None
+    win32con = None
+    win32security = None
+    win32process = None
+    win32service = None
+    win32serviceutil = None
 
 
 class EstadoProceso(Enum):
@@ -206,6 +224,9 @@ class GestorProcesosEA:
 
     def _verificar_si_es_servicio(self, ruta: str) -> str:
         """Verifica con igualdad exacta si la ruta es el binario de un servicio."""
+        if not ES_WINDOWS or win32service is None:
+            # Los servicios de Windows no existen en macOS ni Linux.
+            return ""
         ruta_norm = os.path.normcase(os.path.normpath(ruta))
         if ruta_norm in self._cache_servicios:
             return self._cache_servicios[ruta_norm]
@@ -249,14 +270,25 @@ class GestorProcesosEA:
         return ""
     
     def _obtener_propietario(self, ruta: str) -> str:
-        """Obtiene el propietario del archivo."""
+        """Obtiene el propietario del archivo.
+
+        En Windows consulta el ACL (dueño del descriptor de seguridad); en
+        macOS y Linux usa el ``uid`` del inode resuelto con ``pwd``.
+        """
+        if ES_WINDOWS and win32security is not None:
+            try:
+                sd = win32security.GetFileSecurity(
+                    ruta, win32security.OWNER_SECURITY_INFORMATION
+                )
+                owner_sid = sd.GetSecurityDescriptorOwner()
+                nombre, dominio, _ = win32security.LookupAccountSid(None, owner_sid)
+                return f"{dominio}\\{nombre}" if dominio else nombre
+            except Exception:
+                return "Desconocido"
         try:
-            sd = win32security.GetFileSecurity(
-                ruta, win32security.OWNER_SECURITY_INFORMATION
-            )
-            owner_sid = sd.GetSecurityDescriptorOwner()
-            nombre, dominio, _ = win32security.LookupAccountSid(None, owner_sid)
-            return f"{dominio}\\{nombre}" if dominio else nombre
+            import pwd
+
+            return pwd.getpwuid(os.stat(ruta).st_uid).pw_name
         except Exception:
             return "Desconocido"
     
@@ -305,28 +337,41 @@ class GestorProcesosEA:
             return False, f"Error: {e}"
     
     def _finalizar_con_taskkill(self, info: InfoRutaEACore) -> Tuple[bool, str]:
-        """Intenta finalizar usando taskkill con elevación."""
+        """Intenta finalizar con la herramienta nativa de cada sistema.
+
+        Windows usa ``taskkill /F /T``; en macOS y Linux se envía ``SIGKILL``,
+        que es el equivalente cuando ``psutil`` reporta ``AccessDenied``.
+        """
         try:
             import subprocess
-            # Usar taskkill /F /PID
+
+            if ES_WINDOWS:
+                comando = ["taskkill", "/F", "/PID", str(info.pid), "/T"]
+                etiqueta = "taskkill"
+            else:
+                comando = ["kill", "-9", str(info.pid)]
+                etiqueta = "SIGKILL"
+
             resultado = subprocess.run(
-                ["taskkill", "/F", "/PID", str(info.pid), "/T"],
+                comando,
                 capture_output=True,
                 text=True,
                 timeout=10
             )
             if resultado.returncode == 0:
-                logger.log_proceso_ea(info.ruta, "Finalizado (taskkill)", True)
+                logger.log_proceso_ea(info.ruta, f"Finalizado ({etiqueta})", True)
                 info.estado = EstadoProceso.FINALIZADO
                 info.pid = None
-                return True, "Proceso finalizado con taskkill"
+                return True, f"Proceso finalizado con {etiqueta}"
             else:
-                return False, f"taskkill falló: {resultado.stderr}"
+                return False, f"{etiqueta} falló: {resultado.stderr}"
         except Exception as e:
-            return False, f"Error en taskkill: {e}"
-    
+            return False, f"Error al forzar la finalización: {e}"
+
     def detener_servicio(self, info: InfoRutaEACore) -> Tuple[bool, str]:
         """Detiene el servicio de Windows si existe."""
+        if not ES_WINDOWS or win32serviceutil is None:
+            return False, "Los servicios de Windows no aplican en este sistema operativo"
         if not info.es_servicio or not info.nombre_servicio:
             return False, "No es un servicio registrado"
         
@@ -341,6 +386,8 @@ class GestorProcesosEA:
     
     def deshabilitar_servicio(self, info: InfoRutaEACore) -> Tuple[bool, str]:
         """Deshabilita el servicio para que no inicie automáticamente."""
+        if not ES_WINDOWS or win32serviceutil is None or win32service is None:
+            return False, "Los servicios de Windows no aplican en este sistema operativo"
         if not info.es_servicio or not info.nombre_servicio:
             return False, "No es un servicio registrado"
         
@@ -352,7 +399,7 @@ class GestorProcesosEA:
             return True, f"Servicio {info.nombre_servicio} deshabilitado"
         except Exception as e:
             return False, f"Error deshabilitando servicio: {e}"
-    
+
     def finalizar_todo(self, infos: List[InfoRutaEACore]) -> Dict[str, Tuple[bool, str]]:
         """
         Finaliza todos los procesos EACoreServer activos.
@@ -374,8 +421,18 @@ class GestorProcesosEA:
     
     def _quitar_atributos_archivo(self, ruta: str) -> None:
         """Quita atributos de solo lectura/oculto/sistema de un archivo."""
+        if ES_WINDOWS and win32api is not None:
+            try:
+                win32api.SetFileAttributes(ruta, win32con.FILE_ATTRIBUTE_NORMAL)
+            except Exception:
+                pass
+            return
+        # POSIX: no hay atributos oculto/sistema; basta con habilitar escritura.
         try:
-            win32api.SetFileAttributes(ruta, win32con.FILE_ATTRIBUTE_NORMAL)
+            import stat
+
+            modo = os.stat(ruta).st_mode
+            os.chmod(ruta, modo | stat.S_IWUSR | stat.S_IRUSR)
         except Exception:
             pass
     
@@ -478,9 +535,17 @@ class GestorProcesosEA:
     def detener_y_eliminar_servicio_programdata(self) -> Dict[str, object]:
         """
         Atajo: detiene el servicio EACoreService de ProgramData y elimina
-        EACoreServer.exe + EACore.dat + EACore.dll de esa carpeta (ruta #57).
+        EACoreServer.exe + EACore.dat + EACore.dll de esa carpeta (ruta #52).
+
+        La ruta es exclusiva de Windows; en macOS y Linux se informa de que el
+        servicio no aplica en lugar de intentar operar sobre una ruta inexistente.
         """
         ruta = r"C:\ProgramData\EACoreService\EACoreServer.exe"
+        if not ES_WINDOWS:
+            return {
+                "ruta_exe": ruta,
+                "error": "El servicio EACoreService de ProgramData solo existe en Windows",
+            }
         if not os.path.exists(ruta):
             return {"ruta_exe": ruta, "error": "El servicio EACoreService no está instalado en este equipo"}
         return self.detener_y_eliminar_archivos(ruta)

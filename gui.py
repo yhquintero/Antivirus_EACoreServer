@@ -977,7 +977,9 @@ class AntivirusGUI:
         if not messagebox.askyesno(
             "Confirmar reparación",
             f"Unidad {letra}: se encontró la firma completa.\n\n"
-            "Se restaurarán los archivos de Usb Drive y se eliminarán solo los ficheros 5.dat al 7.dat. "
+            "Se restaurarán los archivos de Usb Drive copiándolos y verificando su SHA-256 "
+            "antes de retirar el origen. Se eliminarán solo los ficheros 5.dat, 6.dat y 7.dat "
+            "y el fichero numérico sin extensión de la carpeta 3.0. "
             "El contenido no reconocido se conservará.\n\n¿Desea continuar?",
         ):
             return
@@ -992,7 +994,8 @@ class AntivirusGUI:
         self._agregar_log(
             f"Archivos movidos: {resultado.archivos_movidos}; carpetas movidas: "
             f"{resultado.carpetas_movidas}; archivos eliminados: "
-            f"{len(resultado.archivos_eliminados)}; errores: {len(resultado.errores)}",
+            f"{len(resultado.archivos_eliminados)}; copias verificadas por SHA-256: "
+            f"{len(resultado.sumas_sha256)}; errores: {len(resultado.errores)}",
             "INFO",
         )
         for error in resultado.errores:

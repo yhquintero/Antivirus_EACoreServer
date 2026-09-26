@@ -1,42 +1,96 @@
 """
 Punto de entrada principal de Antivirus_EACoreServer.
 Verifica permisos de administrador, inicializa componentes y lanza la GUI.
+
+La comprobación de privilegios y la elevación son multiplataforma:
+``IsUserAnAdmin``/``ShellExecuteW`` en Windows, ``geteuid`` con ``osascript`` en
+macOS y ``geteuid`` con ``pkexec`` o ``sudo`` en Linux.
 """
 
 import sys
 import os
 import ctypes
 import logging
+import platform
 
 from logger import obtener_logger
 
 logger = obtener_logger()
 
+ES_WINDOWS = os.name == "nt"
+_SISTEMA = platform.system().lower()
+ES_MACOS = _SISTEMA == "darwin"
+ES_LINUX = _SISTEMA == "linux"
+
 
 def _verificar_admin() -> bool:
-    """Verifica si la aplicación se ejecuta como administrador."""
+    """Verifica si la aplicación se ejecuta con privilegios elevados."""
+    if ES_WINDOWS:
+        try:
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            return False
+    # macOS y Linux: el usuario efectivo 0 es root.
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except Exception:
+        return os.geteuid() == 0
+    except AttributeError:
         return False
 
 
 def _ejecutar_como_admin() -> bool:
     """Re-ejecuta la aplicación con privilegios, conservando argumentos.
 
-    ``ShellExecuteW`` recibe los parámetros como una sola cadena; usar
+    En Windows ``ShellExecuteW`` recibe los parámetros como una sola cadena; usar
     ``list2cmdline`` evita que una instalación en una ruta con espacios falle.
+    En macOS se delega en ``osascript`` y en Linux en ``pkexec`` o ``sudo``.
     """
+    import shlex
     import subprocess
 
-    argumentos = subprocess.list2cmdline([os.path.abspath(sys.argv[0]), *sys.argv[1:]])
-    resultado = ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", sys.executable, argumentos, None, 1
-    )
-    if resultado <= 32:
-        logger.error(f"No se pudo solicitar elevación de privilegios (código {resultado}).")
+    if ES_WINDOWS:
+        argumentos = subprocess.list2cmdline([os.path.abspath(sys.argv[0]), *sys.argv[1:]])
+        resultado = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", sys.executable, argumentos, None, 1
+        )
+        if resultado <= 32:
+            logger.error(f"No se pudo solicitar elevación de privilegios (código {resultado}).")
+            return False
+        return True
+
+    comando = [sys.executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]]
+
+    if ES_MACOS:
+        # osascript muestra el diálogo nativo de administrador.
+        guion = (
+            f'do shell script {shlex.quote(subprocess.list2cmdline(comando))} '
+            f'with administrator privileges'
+        )
+        elevadores = [["osascript", "-e", guion]]
+    else:
+        elevadores = []
+        for herramienta in ("pkexec", "sudo"):
+            if _existe_ejecutable(herramienta):
+                elevadores.append([herramienta, *comando])
+
+    if not elevadores:
+        logger.error("No se encontró ningún mecanismo de elevación en este sistema.")
         return False
-    return True
+
+    for elevador in elevadores:
+        try:
+            logger.info(f"Solicitando elevación con: {elevador[0]}")
+            subprocess.Popen(elevador)
+            return True
+        except OSError as exc:
+            logger.warning(f"{elevador[0]} no pudo iniciar la elevación: {exc}")
+    return False
+
+
+def _existe_ejecutable(nombre: str) -> bool:
+    """Comprueba si un ejecutable está disponible en el PATH."""
+    from shutil import which
+
+    return which(nombre) is not None
 
 
 def main():
