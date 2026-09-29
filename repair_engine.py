@@ -29,7 +29,7 @@ from ctypes import wintypes
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from logger import obtener_logger
 from usb_monitor import ES_WINDOWS, normalizar_identificador_unidad
@@ -94,6 +94,10 @@ class DeteccionInfeccion:
     archivos_firma: Tuple[str, ...] = ()
     detalle: str = ""
     archivos_numericos: Tuple[str, ...] = ()
+    # Ejecutables que quedaron directamente en la raíz del USB. Se informan
+    # únicamente tras confirmar la firma completa; nunca se escanean unidades
+    # internas ni se borran .exe por el nombre solamente.
+    ejecutables_raiz: Tuple[str, ...] = ()
 
     @property
     def confirmada(self) -> bool:
@@ -222,7 +226,7 @@ class MotorReparacionUSB:
             and PATRON_ARCHIVO_NUMERICO.match(entrada.name)
         )
 
-    def analizar_ruta(self, ruta_raiz: str | Path) -> DeteccionInfeccion:
+    def analizar_ruta(self, ruta_raiz: Union[str, Path]) -> DeteccionInfeccion:
         """Analiza una ruta raíz; útil para la GUI y pruebas no destructivas."""
         raiz = Path(ruta_raiz)
         ruta_kaspersky = raiz / self.CARPETA_VIRUS_PRINCIPAL
@@ -247,6 +251,14 @@ class MotorReparacionUSB:
                 nombre for nombre in self.ARCHIVOS_VIRUS if (ruta_bases / nombre).is_file()
             )
             numericos = self._archivos_numericos(ruta_bases)
+            # La variante observada en Windows 11 deja el lanzador en la raíz.
+            # Solo se registra como candidato; la firma .dat + numérico sigue
+            # siendo obligatoria para cualquier acción destructiva.
+            ejecutables_raiz = tuple(sorted(
+                entrada.name for entrada in raiz.iterdir()
+                if entrada.is_file() and not entrada.is_symlink()
+                and entrada.suffix.lower() == ".exe"
+            ))
 
             if len(encontrados) == len(self.ARCHIVOS_VIRUS) and (
                 numericos or not self.REQUIERE_ARCHIVO_NUMERICO
@@ -258,7 +270,8 @@ class MotorReparacionUSB:
                     + ")."
                 )
                 return DeteccionInfeccion(
-                    str(raiz), EstadoDeteccion.CONFIRMADA, encontrados, detalle, numericos
+                    str(raiz), EstadoDeteccion.CONFIRMADA, encontrados, detalle,
+                    numericos, ejecutables_raiz
                 )
 
             if len(encontrados) == len(self.ARCHIVOS_VIRUS) and not numericos:
@@ -291,7 +304,7 @@ class MotorReparacionUSB:
 
     def reparar_ruta(
         self,
-        ruta_raiz: str | Path,
+        ruta_raiz: Union[str, Path],
         callback_progreso: Optional[Callable[[int, str], None]] = None,
         nombre_unidad: Optional[str] = None,
     ) -> ResultadoReparacion:
@@ -340,6 +353,7 @@ class MotorReparacionUSB:
 
             progreso(70, "Eliminando únicamente los ficheros de firma (5.dat-7.dat y numéricos)…")
             self._eliminar_archivos_virus(ruta_bases, resultado)
+            self._eliminar_ejecutables_raiz(raiz, deteccion.ejecutables_raiz, resultado)
             if self._fue_cancelada(resultado):
                 return resultado
 
@@ -698,6 +712,27 @@ class MotorReparacionUSB:
                 resultado.agregar_eliminado_archivo(str(ruta))
             except OSError as exc:
                 resultado.agregar_error(f"Error eliminando {nombre}: {exc}")
+
+    def _eliminar_ejecutables_raiz(
+        self, raiz: Path, nombres: Tuple[str, ...], resultado: ResultadoReparacion
+    ) -> None:
+        """Retira los .exe de la raíz solo después de confirmar la infección.
+
+        No se usa ``rmtree`` ni se toca ningún ejecutable fuera de la raíz del
+        medio. La validación de la firma evita convertir esta función en un
+        borrador indiscriminado de programas legítimos.
+        """
+        for nombre in nombres:
+            if self._cancelar:
+                return
+            ruta = raiz / nombre
+            try:
+                if ruta.is_file() and not ruta.is_symlink() and ruta.suffix.lower() == ".exe":
+                    self._quitar_atributos_archivo(ruta, resultado)
+                    ruta.unlink()
+                    resultado.agregar_eliminado_archivo(str(ruta))
+            except OSError as exc:
+                resultado.agregar_error(f"Error eliminando ejecutable de raíz {nombre}: {exc}")
 
     def _eliminar_carpetas_vacias(
         self,
