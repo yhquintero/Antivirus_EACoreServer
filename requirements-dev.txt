@@ -3,4 +3,7 @@
 -r requirements.txt
 
 # PyInstaller genera el ejecutable en Windows, macOS y Linux.
-pyinstaller>=6.0.0
+# Se acota la versión porque PyInstaller >= 6.1.0 eliminó soporte para Python 3.8.
+# El ejecutable DEBE construirse con Python 3.8 de 32 bits para compatibilidad
+# con Windows 7/8 (Python 3.9+ requiere api-ms-win-core-path-l1-1-0.dll).
+pyinstaller>=5.13.2,<6.1.0
