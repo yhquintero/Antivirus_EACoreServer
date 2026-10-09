@@ -129,6 +129,7 @@ class AntivirusGUI:
 
         # Tooltips registrados.
         self._tooltips: List["ayuda.ToolTip"] = []
+        self._tarjetas: List[Tarjeta] = []
         self._paleta: dict = {}
 
         # Unidades con errores (persistido).
@@ -219,7 +220,7 @@ class AntivirusGUI:
         self._indicador_sistema.pack(side="right", padx=(0, 12))
 
         # Botón de ayuda rápido en la cabecera.
-        self.btn_ayuda_rapido = BotonProfesional(
+        self.btn_ayuda = BotonProfesional(
             cabecera,
             text="Ayuda (F1)",
             command=self._abrir_guia,
@@ -232,7 +233,8 @@ class AntivirusGUI:
             ancho_min=120,
             alto=34,
         )
-        self.btn_ayuda_rapido.pack(side="right", padx=(0, 12))
+        self.btn_ayuda_rapido = self.btn_ayuda
+        self.btn_ayuda.pack(side="right", padx=(0, 12))
 
         # Separador bajo la cabecera.
         separador_horizontal(self.root, color=paleta["borde"], grosor=2)
@@ -386,6 +388,9 @@ class AntivirusGUI:
         if hasattr(self, "_tooltips"):
             for tooltip in self._tooltips:
                 tooltip.aplicar_colores(p["tooltip_bg"], p["tooltip_fg"], p["borde"])
+        if hasattr(self, "_tarjetas"):
+            for tarjeta in self._tarjetas:
+                tarjeta.cambiar_tema(p["panel"], p["borde"], p["acento"])
         if hasattr(self, "ayuda_text"):
             self.ayuda_text.configure(
                 bg=p["panel"], fg=p["fg"], insertbackground=p["acento"],
@@ -611,7 +616,7 @@ class AntivirusGUI:
         self.notebook.add(self.tab_procesos, text="  Gestión de procesos  ")
 
         # Tarjeta superior: controles de escaneo.
-        tarjeta_controles = Tarjeta(
+        self.tarjeta_controles = Tarjeta(
             self.tab_procesos, titulo="Escaneo de rutas EACoreServer",
             color_fondo=self._paleta_actual()["panel"],
             color_borde=self._paleta_actual()["borde"],
@@ -619,9 +624,10 @@ class AntivirusGUI:
             fuente_titulo=self._fuente(10, True),
             padding=10,
         )
-        tarjeta_controles.cuerpo.pack(fill="x")
+        self.tarjeta_controles.pack(fill="x", padx=8, pady=(8, 4))
+        self._tarjetas.append(self.tarjeta_controles)
 
-        control_frame = tarjeta_controles.cuerpo
+        control_frame = self.tarjeta_controles.cuerpo
 
         self.btn_escanear = BotonProfesional(
             control_frame, text="Escanear rutas", command=self._escanear_rutas,
@@ -724,7 +730,7 @@ class AntivirusGUI:
         self.tree_procesos.bind("<Delete>", lambda _e: self._finalizar_seleccionado())
 
         # Tarjeta inferior: acciones individuales.
-        tarjeta_acciones = Tarjeta(
+        self.tarjeta_acciones = Tarjeta(
             self.tab_procesos, titulo="Acciones sobre la selección",
             color_fondo=self._paleta_actual()["panel"],
             color_borde=self._paleta_actual()["borde"],
@@ -732,9 +738,10 @@ class AntivirusGUI:
             fuente_titulo=self._fuente(10, True),
             padding=10,
         )
-        tarjeta_acciones.cuerpo.pack(fill="x", pady=(0, 4))
+        self.tarjeta_acciones.pack(fill="x", padx=8, pady=(4, 4))
+        self._tarjetas.append(self.tarjeta_acciones)
 
-        accion_frame = tarjeta_acciones.cuerpo
+        accion_frame = self.tarjeta_acciones.cuerpo
 
         self.btn_finalizar_sel = BotonProfesional(
             accion_frame, text="Finalizar seleccionado",
@@ -787,7 +794,7 @@ class AntivirusGUI:
         self.notebook.add(self.tab_usb, text="  Reparación de unidades  ")
 
         # Tarjeta superior: unidades detectadas.
-        tarjeta_unidades = Tarjeta(
+        self.tarjeta_unidades = Tarjeta(
             self.tab_usb, titulo="Unidades detectadas",
             color_fondo=self._paleta_actual()["panel"],
             color_borde=self._paleta_actual()["borde"],
@@ -795,11 +802,12 @@ class AntivirusGUI:
             fuente_titulo=self._fuente(10, True),
             padding=10,
         )
-        tarjeta_unidades.cuerpo.pack(fill="both", expand=True)
+        self.tarjeta_unidades.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        self._tarjetas.append(self.tarjeta_unidades)
 
         columns_usb = ("letra", "etiqueta", "serie", "tamano", "libre", "estado")
         self.tree_usb = ttk.Treeview(
-            tarjeta_unidades.cuerpo, columns=columns_usb, show="headings",
+            self.tarjeta_unidades.cuerpo, columns=columns_usb, show="headings",
             style="Custom.Treeview", height=8
         )
         self._registrar_tooltip(self.tree_usb, "tabla_usb")
@@ -820,7 +828,7 @@ class AntivirusGUI:
 
         self.tree_usb.pack(side="left", fill=tk.BOTH, expand=True)
 
-        scrollbar_usb = ttk.Scrollbar(tarjeta_unidades.cuerpo, orient="vertical", command=self.tree_usb.yview)
+        scrollbar_usb = ttk.Scrollbar(self.tarjeta_unidades.cuerpo, orient="vertical", command=self.tree_usb.yview)
         self.tree_usb.configure(yscrollcommand=scrollbar_usb.set)
         scrollbar_usb.pack(side="right", fill="y")
 
@@ -852,7 +860,8 @@ class AntivirusGUI:
             fuente_titulo=self._fuente(10, True),
             padding=10,
         )
-        tarjeta_progreso.cuerpo.pack(fill="x", pady=(4, 0))
+        tarjeta_progreso.pack(fill="x", padx=8, pady=(4, 0))
+        self._tarjetas.append(tarjeta_progreso)
 
         self._barra_progreso = BarraProgreso(
             tarjeta_progreso.cuerpo, maximo=100,
@@ -875,7 +884,7 @@ class AntivirusGUI:
         # Botones de acción.
         separador_horizontal(self.tab_usb, color=self._paleta_actual()["borde"])
 
-        tarjeta_acciones_usb = Tarjeta(
+        self.tarjeta_acciones_usb = Tarjeta(
             self.tab_usb, titulo="Acciones",
             color_fondo=self._paleta_actual()["panel"],
             color_borde=self._paleta_actual()["borde"],
@@ -883,10 +892,11 @@ class AntivirusGUI:
             fuente_titulo=self._fuente(10, True),
             padding=10,
         )
-        tarjeta_acciones_usb.cuerpo.pack(fill="x", pady=(4, 4))
+        self.tarjeta_acciones_usb.pack(fill="x", padx=8, pady=(4, 4))
+        self._tarjetas.append(self.tarjeta_acciones_usb)
 
         self.btn_reparar = BotonProfesional(
-            tarjeta_acciones_usb.cuerpo, text="Reparar seleccionada",
+            self.tarjeta_acciones_usb.cuerpo, text="Reparar seleccionada",
             command=self._reparar_unidad_seleccionada,
             color_fondo=self._paleta_actual()["exito"],
             color_fondo_hover="#2ebd6e",
@@ -899,7 +909,7 @@ class AntivirusGUI:
         self._registrar_tooltip(self.btn_reparar, "reparar")
 
         self.btn_reparar_todas = BotonProfesional(
-            tarjeta_acciones_usb.cuerpo, text="Reparar todas (confirmadas)",
+            self.tarjeta_acciones_usb.cuerpo, text="Reparar todas (confirmadas)",
             command=self._reparar_todas_usb,
             color_fondo=self._paleta_actual()["exito"],
             color_fondo_hover="#2ebd6e",
@@ -912,7 +922,7 @@ class AntivirusGUI:
         self._registrar_tooltip(self.btn_reparar_todas, "reparar_todas")
 
         self.btn_refrescar_usb = BotonProfesional(
-            tarjeta_acciones_usb.cuerpo, text="Refrescar unidades",
+            self.tarjeta_acciones_usb.cuerpo, text="Refrescar unidades",
             command=self._refrescar_unidades,
             color_fondo=self._paleta_actual()["frame"],
             color_fondo_hover=self._paleta_actual()["acento_suave"],
@@ -924,7 +934,7 @@ class AntivirusGUI:
         self._registrar_tooltip(self.btn_refrescar_usb, "refrescar")
 
         self.btn_cancelar = BotonProfesional(
-            tarjeta_acciones_usb.cuerpo, text="Cancelar",
+            self.tarjeta_acciones_usb.cuerpo, text="Cancelar",
             command=self._cancelar_reparacion_actual,
             color_fondo=self._paleta_actual()["advertencia"],
             color_fondo_hover="#e09010",
