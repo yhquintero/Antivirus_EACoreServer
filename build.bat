@@ -51,8 +51,8 @@ if not "%PY_MAJOR%"=="3" (
     echo api-ms-win-core-path-l1-1-0.dll, inexistente en Windows 7 y 8.
     echo El usuario final vera este error al intentar abrir el programa:
     echo.
-    echo   "El programa no puede iniciarse porque falta
-    echo    api-ms-win-core-path-l1-1-0.dll en el equipo."
+    echo   ^"El programa no puede iniciarse porque falta
+    echo    api-ms-win-core-path-l1-1-0.dll en el equipo.^"
     echo.
     echo Solucion: use Python 3.8 de 32 bits para compilar.
     pause
@@ -65,11 +65,11 @@ if not "%PY_MINOR%"=="8" (
     echo Python 3.%PY_MINOR% no es compatible con Windows 7/8. El ejecutable
     echo generado fallara al arrancar en esos sistemas con el siguiente error:
     echo.
-    echo   "El programa no puede iniciarse porque falta
-    echo    api-ms-win-core-path-l1-1-0.dll en el equipo."
+    echo   ^"El programa no puede iniciarse porque falta
+    echo    api-ms-win-core-path-l1-1-0.dll en el equipo.^"
     echo.
-    echo   "Failed to load Python DLL 'C:\Windows\TEMP\2\_MEI...\python3%PY_MINOR%.dll'.
-    echo    LoadLibrary: No se puede encontrar el modulo especificado."
+    echo   ^"Failed to load Python DLL 'C:\Windows\TEMP\2\_MEI...\python3%PY_MINOR%.dll'.
+    echo    LoadLibrary: No se puede encontrar el modulo especificado.^"
     echo.
     echo Solucion:
     echo   1. Desinstale Python %PYTHON_VERSION%.
@@ -85,14 +85,14 @@ REM  3. Verificar arquitectura: debe ser 32 bits
 REM -----------------------------------------------
 python -c "import struct; exit(0 if struct.calcsize('P') == 4 else 1)" >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Se requiere Python 3.8 de 32 BITS (x86), se detecto 64 bits.
+    echo [ERROR] Se requiere Python 3.8 de 32 BITS ^(x86^), se detecto 64 bits.
     echo.
     echo Un ejecutable x86 funciona en Windows de 32 y 64 bits.
     echo Un ejecutable x64 SOLO funciona en Windows de 64 bits.
     echo.
     echo Para maximizar la compatibilidad, instale Python 3.8 de 32 bits:
     echo   https://www.python.org/downloads/release/python-3820/
-    echo   (el instalador "Windows installer (32-bit)")
+    echo   ^(el instalador ^"Windows installer ^(32-bit^)^"^)
     pause
     exit /b 1
 )
