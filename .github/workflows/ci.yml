@@ -76,7 +76,7 @@ jobs:
       # usb_monitor_windows.py (que requiere pywin32) puede compilarse también
       # en Ubuntu y macOS.
       - name: Comprobar sintaxis
-        run: python -m py_compile main.py gui.py logger.py process_manager.py repair_engine.py scraper.py usb_monitor.py usb_monitor_windows.py compat.py temas.py ayuda.py
+        run: python -m py_compile main.py gui.py logger.py process_manager.py repair_engine.py scraper.py usb_monitor.py usb_monitor_windows.py compat.py temas.py ayuda.py win7_compat.py ui_components.py toast.py
 
       # El piso de Python 3.8 no se puede dejar a la intuición: si alguien usa
       # match/case, uniones PEP 604 o dict[str, str] en tiempo de ejecución, el

@@ -5,19 +5,61 @@ inicializa componentes y lanza la GUI.
 
 Orden de las comprobaciones
 ---------------------------
-1. **Versión de Python.** Se comprueba primero y solo con ``sys``, antes de
-   importar :mod:`compat`, porque ese módulo usa ``dataclasses`` (3.7+). Si el
+1. **Compatibilidad del sistema (DLLs críticas).** En Windows, antes de
+   importar cualquier módulo del proyecto se comprueba que las DLLs del sistema
+   necesarias estén disponibles. Si falta ``api-ms-win-core-path-l1-1-0.dll``
+   (Python 3.11+ en Windows 7) o la carpeta temporal no es escribible, se
+   muestra un diálogo claro al usuario. Esto evita los errores crípticos de
+   PyInstaller:
+
+   - "El programa no puede iniciarse porque falta
+     api-ms-win-core-path-l1-1-0.dll en el equipo."
+   - "Failed to load Python DLL 'C:\\Windows\\TEMP\\2\\_MEI...\python3x.dll'."
+
+   Consulte :mod:`win7_compat` para el diagnóstico completo.
+2. **Versión de Python.** Se comprueba a continuación y solo con ``sys``, antes
+   de importar :mod:`compat`, porque ese módulo usa ``dataclasses`` (3.7+). Si el
    intérprete es demasiado antiguo, cualquier otra importación reventaría con un
    error críptico en lugar de un mensaje comprensible.
-2. **Sistema operativo.** Windows 2000/XP/Server 2003 quedan fuera de forma
+3. **Sistema operativo.** Windows 2000/XP/Server 2003 quedan fuera de forma
    definitiva (el último Python con instalador para XP es 3.4.4 y las
    dependencias exigen 3.8+). Vista, 7 y 8 requieren Python 3.8.
-3. **Privilegios.** ``IsUserAnAdmin``/``ShellExecuteW`` en Windows, ``geteuid``
+4. **Privilegios.** ``IsUserAnAdmin``/``ShellExecuteW`` en Windows, ``geteuid``
    con ``osascript`` en macOS y ``geteuid`` con ``pkexec`` o ``sudo`` en Linux.
 """
 
+from __future__ import annotations
+
 import sys
 import os
+
+# ---------------------------------------------------------------------------
+# 1. Compatibilidad del sistema (antes de cualquier importación del proyecto).
+# ---------------------------------------------------------------------------
+# En Windows, PyInstaller puede fallar al cargar ``python3x.dll`` si la carpeta
+# temporal no es escribible o si faltan DLLs del sistema (Windows 7 + Python
+# 3.11+). ``win7_compat`` se importa usando solo ``os``, ``sys`` y ``ctypes``,
+# por lo que funciona incluso cuando el resto del programa no puede cargarse.
+try:
+    # Importación absoluta que funciona tanto en modo script como en el
+    # ejecutable empaquetado por PyInstaller.
+    from win7_compat import comprobar_y_reportar as _win7_compat_check
+    if not _win7_compat_check():
+        sys.exit(2)
+except ImportError:
+    # El módulo no existe (versiones anteriores del proyecto, entornos sin
+    # Windows): continuar con la secuencia normal de arranque.
+    pass
+except Exception as _exc:  # pragma: no cover - defensivo
+    # Si el diagnóstico mismo falla, no bloquear el arranque.
+    try:
+        print(
+            f"[AVISO] No se pudo ejecutar el diagnóstico de compatibilidad: {_exc}",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass
+
 import ctypes
 import logging
 import platform
