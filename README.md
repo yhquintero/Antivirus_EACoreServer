@@ -197,7 +197,7 @@ deactivate
 Con el entorno virtual activado, instale las dependencias principales:
 
 ```bash
-pip install --upgrade pip
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
@@ -337,7 +337,7 @@ source venv/bin/activate
 ### Paso 4: Instalar dependencias de desarrollo
 
 ```bash
-pip install --upgrade pip
+python -m pip install --upgrade pip
 pip install -r requirements-dev.txt
 ```
 
